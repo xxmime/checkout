@@ -52,6 +52,14 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
         )
 
         await git
+          .config(`url."${settings.githubServerUrl}/".insteadOf`, `${settings.githubProxyUrl}/${settings.githubServerUrl}/`, true, true)
+          .catch(error=>{
+              core.info(
+                `Failed to set insteadOf proxy url: ${error}`
+              )
+          })
+
+        await git
           .config('safe.directory', settings.repositoryPath, true, true)
           .catch(error => {
             core.info(
@@ -97,7 +105,8 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
         settings.ref,
         settings.commit,
         settings.repositoryPath,
-        settings.githubServerUrl
+        settings.githubServerUrl,
+        settings.githubProxyUrl
       )
       return
     }

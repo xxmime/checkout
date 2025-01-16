@@ -118,4 +118,9 @@ export interface IGitSourceSettings {
    * User override on the GitHub Server/Host URL that hosts the repository to be cloned
    */
   githubServerUrl: string | undefined
+
+  /**
+   * User override to proxy the GitHub URL that hosts the repository to be cloned
+   */
+  githubProxyUrl: string | undefined
 }
