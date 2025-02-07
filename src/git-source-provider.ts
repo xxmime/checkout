@@ -97,7 +97,8 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
         settings.ref,
         settings.commit,
         settings.repositoryPath,
-        settings.githubServerUrl
+        settings.githubServerUrl,
+        settings.githubProxyUrl
       )
       return
     }

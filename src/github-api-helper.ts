@@ -6,6 +6,7 @@ import * as io from '@actions/io'
 import * as path from 'path'
 import * as retryHelper from './retry-helper'
 import * as toolCache from '@actions/tool-cache'
+import fetch from 'node-fetch'
 import {v4 as uuid} from 'uuid'
 import {getServerApiUrl} from './url-helper'
 
@@ -18,7 +19,8 @@ export async function downloadRepository(
   ref: string,
   commit: string,
   repositoryPath: string,
-  baseUrl?: string
+  baseUrl?: string,
+  proxyUrl?: string
 ): Promise<void> {
   // Determine the default branch
   if (!ref && !commit) {
@@ -29,7 +31,7 @@ export async function downloadRepository(
   // Download the archive
   let archiveData = await retryHelper.execute(async () => {
     core.info('Downloading the archive')
-    return await downloadArchive(authToken, owner, repo, ref, commit, baseUrl)
+    return await downloadArchive(authToken, owner, repo, ref, commit, baseUrl, proxyUrl)
   })
 
   // Write archive to disk
@@ -128,18 +130,25 @@ async function downloadArchive(
   repo: string,
   ref: string,
   commit: string,
-  baseUrl?: string
+  baseUrl?: string,
+  proxyUrl?: string
 ): Promise<Buffer> {
-  const octokit = github.getOctokit(authToken, {
-    baseUrl: getServerApiUrl(baseUrl)
+  const serverUrl = getServerApiUrl(baseUrl) || 'https://api.github.com'
+  const archiveFormat = IS_WINDOWS ? 'zipball' : 'tarball'
+  let url = `${proxyUrl}/${serverUrl}/repos/${owner}/${repo}/${archiveFormat}/${commit || ref}`
+  if (proxyUrl === undefined) {
+    url = `${proxyUrl}/${url}`
+  } 
+  const response = await fetch(url, {
+    headers: {
+      'Authorization': `token ${authToken}`,
+      'Accept': 'application/vnd.github.v3+json'
+    }
   })
-  const download = IS_WINDOWS
-    ? octokit.rest.repos.downloadZipballArchive
-    : octokit.rest.repos.downloadTarballArchive
-  const response = await download({
-    owner: owner,
-    repo: repo,
-    ref: commit || ref
-  })
-  return Buffer.from(response.data as ArrayBuffer) // response.data is ArrayBuffer
+
+  if (!response.ok) {
+    throw new Error(`Failed to download archive: ${response.statusText}`)
+  }
+
+  return Buffer.from(await response.arrayBuffer())
 }
