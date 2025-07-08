@@ -37,6 +37,12 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
   // Git command manager
   core.startGroup('Getting Git version info')
   const git = await getGitCommandManager(settings)
+  if (settings.githubProxyUrl) {
+    await git.config(
+      `http.https://github.com/.proxy`,
+      settings.githubProxyUrl
+    )
+  }
   core.endGroup()
 
   let authHelper: gitAuthHelper.IGitAuthHelper | null = null
