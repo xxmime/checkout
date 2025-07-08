@@ -17,7 +17,11 @@ export function getFetchUrl(settings: IGitSourceSettings): string {
   }
 
   // "origin" is SCHEME://HOSTNAME[:PORT]
-  return `${serviceUrl.origin}/${encodedOwner}/${encodedName}`
+  const originUrl = `${serviceUrl.origin}/${encodedOwner}/${encodedName}`
+  if (settings.githubProxyUrl && settings.githubProxyUrl.trim()) {
+    return getProxyUrl(originUrl, settings.githubProxyUrl)
+  }
+  return originUrl
 }
 
 export function getServerUrl(url?: string): URL {
@@ -31,11 +35,11 @@ export function getServerUrl(url?: string): URL {
 
 export function getServerApiUrl(url?: string): string {
   if (hasContent(url, WhitespaceMode.Trim)) {
-    let serverUrl = getServerUrl(url)
+    const serverUrl = getServerUrl(url)
     if (isGhes(url)) {
       serverUrl.pathname = 'api/v3'
     } else {
-      serverUrl.hostname = 'api.' + serverUrl.hostname
+      serverUrl.hostname = `api.${serverUrl.hostname}`
     }
 
     return pruneSuffix(serverUrl.toString(), '/')
@@ -78,4 +82,15 @@ function hasContent(
     refinedText = refinedText.trim()
   }
   return refinedText.length > 0
+}
+
+export function getProxyUrl(
+  originalUrl: string,
+  proxyPrefix: string | undefined
+): string {
+  if (proxyPrefix && proxyPrefix.trim()) {
+    // 兼容末尾斜杠
+    return `${proxyPrefix.replace(/\/$/, '')}/${originalUrl}`
+  }
+  return originalUrl
 }

@@ -162,7 +162,7 @@ export async function getInputs(): Promise<IGitSourceSettings> {
   core.debug(`GitHub Host URL = ${result.githubServerUrl}`)
 
   result.githubProxyUrl = core.getInput('github-proxy-url')
-  core.debug(`GitHub Host URL = ${result.githubProxyUrl}`)
+  core.debug(`GitHub Proxy URL = ${result.githubProxyUrl}`)
 
   return result
 }

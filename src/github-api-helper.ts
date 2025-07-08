@@ -8,7 +8,7 @@ import * as retryHelper from './retry-helper'
 import * as toolCache from '@actions/tool-cache'
 import fetch from 'node-fetch'
 import {v4 as uuid} from 'uuid'
-import {getServerApiUrl} from './url-helper'
+import {getServerApiUrl, getProxyUrl} from './url-helper'
 
 const IS_WINDOWS = process.platform === 'win32'
 
@@ -31,7 +31,15 @@ export async function downloadRepository(
   // Download the archive
   let archiveData = await retryHelper.execute(async () => {
     core.info('Downloading the archive')
-    return await downloadArchive(authToken, owner, repo, ref, commit, baseUrl, proxyUrl)
+    return await downloadArchive(
+      authToken,
+      owner,
+      repo,
+      ref,
+      commit,
+      baseUrl,
+      proxyUrl
+    )
   })
 
   // Write archive to disk
@@ -135,14 +143,14 @@ async function downloadArchive(
 ): Promise<Buffer> {
   const serverUrl = getServerApiUrl(baseUrl) || 'https://api.github.com'
   const archiveFormat = IS_WINDOWS ? 'zipball' : 'tarball'
-  let url = `${proxyUrl}/${serverUrl}/repos/${owner}/${repo}/${archiveFormat}/${commit || ref}`
-  if (proxyUrl === undefined) {
-    url = `${proxyUrl}/${url}`
-  } 
+  let url = `${serverUrl}/repos/${owner}/${repo}/${archiveFormat}/${commit || ref}`
+  if (proxyUrl && proxyUrl.trim()) {
+    url = getProxyUrl(url, proxyUrl)
+  }
   const response = await fetch(url, {
     headers: {
-      'Authorization': `token ${authToken}`,
-      'Accept': 'application/vnd.github.v3+json'
+      Authorization: `token ${authToken}`,
+      Accept: 'application/vnd.github.v3+json'
     }
   })
 
