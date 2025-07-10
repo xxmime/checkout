@@ -90,3 +90,43 @@ describe('getServerApiUrl tests', () => {
     ).toBe('https://src.onpremise.fabrikam.com/api/v3')
   })
 })
+
+describe('getProxyUrl tests', () => {
+  it('should return original URL when no proxy prefix', async () => {
+    expect(urlHelper.getProxyUrl('https://github.com', undefined)).toBe('https://github.com')
+  })
+
+  it('should return original URL when empty proxy prefix', async () => {
+    expect(urlHelper.getProxyUrl('https://github.com', '')).toBe('https://github.com')
+  })
+
+  it('should return proxy URL when proxy prefix provided', async () => {
+    expect(urlHelper.getProxyUrl('https://github.com/owner/repo', 'https://proxy.example.com')).toBe('https://proxy.example.com/https://github.com/owner/repo')
+  })
+
+  it('should handle proxy prefix with trailing slash', async () => {
+    expect(urlHelper.getProxyUrl('https://github.com/owner/repo', 'https://proxy.example.com/')).toBe('https://proxy.example.com/https://github.com/owner/repo')
+  })
+})
+
+describe('getFetchUrl tests', () => {
+  it('should return proxy URL when githubProxyUrl is set', async () => {
+    const settings = {
+      repositoryOwner: 'owner',
+      repositoryName: 'repo',
+      githubProxyUrl: 'https://proxy.example.com/',
+      sshKey: ''
+    } as any
+    expect(urlHelper.getFetchUrl(settings)).toBe('https://proxy.example.com/https://github.com/owner/repo')
+  })
+
+  it('should return original URL when githubProxyUrl is not set', async () => {
+    const settings = {
+      repositoryOwner: 'owner',
+      repositoryName: 'repo',
+      githubProxyUrl: undefined,
+      sshKey: ''
+    } as any
+    expect(urlHelper.getFetchUrl(settings)).toBe('https://github.com/owner/repo')
+  })
+})

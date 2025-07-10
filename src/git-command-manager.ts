@@ -63,6 +63,7 @@ export interface IGitCommandManager {
   tryGetFetchUrl(): Promise<string>
   tryReset(): Promise<boolean>
   version(): Promise<GitVersion>
+  remoteSetUrl(remoteName: string, url: string): Promise<void>
 }
 
 export async function createCommandManager(
@@ -488,6 +489,10 @@ class GitCommandManager {
 
   async version(): Promise<GitVersion> {
     return this.gitVersion
+  }
+
+  async remoteSetUrl(remoteName: string, url: string): Promise<void> {
+    await this.execGit(['remote', 'set-url', remoteName, url])
   }
 
   static async createCommandManager(

@@ -38,10 +38,7 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
   core.startGroup('Getting Git version info')
   const git = await getGitCommandManager(settings)
   if (settings.githubProxyUrl) {
-    await git.config(
-      `http.https://github.com/.proxy`,
-      settings.githubProxyUrl
-    )
+    await git.config(`http.https://github.com/.proxy`, settings.githubProxyUrl)
   }
   core.endGroup()
 
@@ -120,6 +117,9 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
       await git.init()
       await git.remoteAdd('origin', repositoryUrl)
       core.endGroup()
+    } else {
+      // 已有仓库，强制设置 origin URL 为代理地址
+      await git.remoteSetUrl('origin', repositoryUrl)
     }
 
     // Disable automatic garbage collection
@@ -219,7 +219,7 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
 
     // Sparse checkout
     if (!settings.sparseCheckout) {
-      let gitVersion = await git.version()
+      const gitVersion = await git.version()
       // no need to disable sparse-checkout if the installed git runtime doesn't even support it.
       if (gitVersion.checkMinimum(MinimumGitSparseCheckoutVersion)) {
         await git.disableSparseCheckout()

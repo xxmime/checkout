@@ -1,4 +1,5 @@
 import * as assert from 'assert'
+import * as core from '@actions/core'
 import {URL} from 'url'
 import {IGitSourceSettings} from './git-source-settings'
 
@@ -19,7 +20,11 @@ export function getFetchUrl(settings: IGitSourceSettings): string {
   // "origin" is SCHEME://HOSTNAME[:PORT]
   const originUrl = `${serviceUrl.origin}/${encodedOwner}/${encodedName}`
   if (settings.githubProxyUrl && settings.githubProxyUrl.trim()) {
-    return getProxyUrl(originUrl, settings.githubProxyUrl)
+    const proxyUrl = getProxyUrl(originUrl, settings.githubProxyUrl)
+    core.debug(`Original URL: ${originUrl}`)
+    core.debug(`Proxy prefix: ${settings.githubProxyUrl}`)
+    core.debug(`Final proxy URL: ${proxyUrl}`)
+    return proxyUrl
   }
   return originUrl
 }
@@ -90,7 +95,8 @@ export function getProxyUrl(
 ): string {
   if (proxyPrefix && proxyPrefix.trim()) {
     // 兼容末尾斜杠
-    return `${proxyPrefix.replace(/\/$/, '')}/${originalUrl}`
+    const cleanPrefix = proxyPrefix.replace(/\/$/, '')
+    return `${cleanPrefix}/${originalUrl}`
   }
   return originalUrl
 }
