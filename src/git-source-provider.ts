@@ -22,7 +22,7 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
   )
 
   // Log proxy configuration details prominently
-  if (settings.githubProxyUrl) {
+  if (settings.githubProxyUrl && settings.githubProxyUrl.trim()) {
     core.notice('🌐 PROXY ACCELERATION ENABLED')
     core.notice(`📍 Proxy URL: ${settings.githubProxyUrl}`)
     core.notice(`🎯 Target Server: ${settings.githubServerUrl || 'https://github.com'}`)
@@ -58,7 +58,7 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
   core.endGroup()
 
   // Configure proxy settings for git operations (separate group for visibility)
-  if (git && settings.githubProxyUrl) {
+  if (git && settings.githubProxyUrl && settings.githubProxyUrl.trim()) {
     await configureGitProxy(git, settings)
   }
 

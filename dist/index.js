@@ -866,6 +866,11 @@ class GitCommandManager {
             return this.gitVersion;
         });
     }
+    remoteSetUrl(remoteName, url) {
+        return __awaiter(this, void 0, void 0, function* () {
+            yield this.execGit(['remote', 'set-url', remoteName, url]);
+        });
+    }
     static createCommandManager(workingDirectory, lfs, doSparseCheckout) {
         return __awaiter(this, void 0, void 0, function* () {
             const result = new GitCommandManager();
@@ -1182,6 +1187,22 @@ function getSource(settings) {
     return __awaiter(this, void 0, void 0, function* () {
         // Repository URL
         core.info(`Syncing repository: ${settings.repositoryOwner}/${settings.repositoryName}`);
+        // Log proxy configuration details prominently
+        if (settings.githubProxyUrl && settings.githubProxyUrl.trim()) {
+            core.notice('🌐 PROXY ACCELERATION ENABLED');
+            core.notice(`📍 Proxy URL: ${settings.githubProxyUrl}`);
+            core.notice(`🎯 Target Server: ${settings.githubServerUrl || 'https://github.com'}`);
+            core.notice(`📦 Repository: ${settings.repositoryOwner}/${settings.repositoryName}`);
+            core.startGroup('🚀 Proxy Configuration Details');
+            core.info(`SSH Key: ${settings.sshKey ? 'Configured' : 'Not configured'}`);
+            core.info(`LFS: ${settings.lfs ? 'Enabled' : 'Disabled'}`);
+            core.info(`Submodules: ${settings.submodules ? 'Enabled' : 'Disabled'}`);
+            core.info(`Fetch Depth: ${settings.fetchDepth}`);
+            core.endGroup();
+        }
+        else {
+            core.notice('📡 Using direct connection (no proxy)');
+        }
         const repositoryUrl = urlHelper.getFetchUrl(settings);
         // Remove conflicting file path
         if (fsHelper.fileExistsSync(settings.repositoryPath)) {
@@ -1197,6 +1218,10 @@ function getSource(settings) {
         core.startGroup('Getting Git version info');
         const git = yield getGitCommandManager(settings);
         core.endGroup();
+        // Configure proxy settings for git operations (separate group for visibility)
+        if (git && settings.githubProxyUrl && settings.githubProxyUrl.trim()) {
+            yield configureGitProxy(git, settings);
+        }
         let authHelper = null;
         try {
             if (git) {
@@ -1239,6 +1264,10 @@ function getSource(settings) {
                 yield git.init();
                 yield git.remoteAdd('origin', repositoryUrl);
                 core.endGroup();
+            }
+            else {
+                // 已有仓库，强制设置 origin URL 为代理地址
+                yield git.remoteSetUrl('origin', repositoryUrl);
             }
             // Disable automatic garbage collection
             core.startGroup('Disabling automatic garbage collection');
@@ -1311,7 +1340,7 @@ function getSource(settings) {
             }
             // Sparse checkout
             if (!settings.sparseCheckout) {
-                let gitVersion = yield git.version();
+                const gitVersion = yield git.version();
                 // no need to disable sparse-checkout if the installed git runtime doesn't even support it.
                 if (gitVersion.checkMinimum(git_command_manager_1.MinimumGitSparseCheckoutVersion)) {
                     yield git.disableSparseCheckout();
@@ -1337,6 +1366,11 @@ function getSource(settings) {
                 core.startGroup('Setting up auth for fetching submodules');
                 yield authHelper.configureGlobalAuth();
                 core.endGroup();
+                // Configure proxy for submodules
+                if (settings.githubProxyUrl) {
+                    core.notice('🔧 Configuring proxy for submodules...');
+                    yield configureSubmoduleProxy(git, settings);
+                }
                 // Checkout submodules
                 core.startGroup('Fetching submodules');
                 yield git.submoduleSync(settings.nestedSubmodules);
@@ -1403,6 +1437,95 @@ function cleanup(repositoryPath) {
         }
         finally {
             yield authHelper.removeGlobalConfig();
+        }
+    });
+}
+function configureGitProxy(git, settings) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        const proxyUrl = (_a = settings.githubProxyUrl) === null || _a === void 0 ? void 0 : _a.trim();
+        if (!proxyUrl) {
+            return;
+        }
+        core.startGroup('⚙️ CONFIGURING GIT PROXY SETTINGS');
+        try {
+            // Validate proxy URL format
+            if (!urlHelper.validateProxyUrl(proxyUrl)) {
+                core.error(`❌ Invalid proxy URL format: ${proxyUrl}`);
+                throw new Error(`Invalid proxy URL format: ${proxyUrl}`);
+            }
+            core.notice(`✅ Proxy URL validation passed: ${proxyUrl}`);
+            // Test proxy connection
+            core.notice('🔍 Testing proxy connection...');
+            const testResult = yield urlHelper.testProxyConnection(proxyUrl, settings.githubServerUrl);
+            if (testResult.success) {
+                core.notice(`🚀 Proxy connection test SUCCESSFUL (${testResult.responseTime}ms)`);
+            }
+            else {
+                core.warning(`⚠️ Proxy connection test FAILED: ${testResult.error}`);
+                core.warning('⏭️ Proceeding with proxy configuration anyway...');
+            }
+            const serverUrl = settings.githubServerUrl || 'https://github.com';
+            const serverHost = new URL(serverUrl).hostname;
+            // Configure HTTP proxy for the specific GitHub server
+            const httpProxyKey = `http.https://${serverHost}/.proxy`;
+            yield git.config(httpProxyKey, proxyUrl);
+            core.notice(`✅ Configured HTTPS proxy: ${httpProxyKey} = ${proxyUrl}`);
+            // Also configure for HTTP if the server supports it
+            const httpKey = `http.http://${serverHost}/.proxy`;
+            yield git.config(httpKey, proxyUrl);
+            core.notice(`✅ Configured HTTP proxy: ${httpKey} = ${proxyUrl}`);
+            // Configure proxy for submodules
+            yield git.config('http.proxy', proxyUrl);
+            core.notice(`✅ Configured global HTTP proxy: http.proxy = ${proxyUrl}`);
+            // Set proxy timeout and other related settings
+            yield git.config('http.lowSpeedLimit', '1000');
+            yield git.config('http.lowSpeedTime', '300');
+            yield git.config('http.postBuffer', '524288000'); // 500MB buffer for large repos
+            core.notice('✅ Configured HTTP timeout and buffer settings');
+            core.notice('🎉 Git proxy configuration completed successfully!');
+        }
+        catch (error) {
+            core.error(`❌ Failed to configure Git proxy: ${error}`);
+            throw error;
+        }
+        finally {
+            core.endGroup();
+        }
+    });
+}
+function configureSubmoduleProxy(git, settings) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        const proxyUrl = (_a = settings.githubProxyUrl) === null || _a === void 0 ? void 0 : _a.trim();
+        if (!proxyUrl) {
+            return;
+        }
+        try {
+            const serverUrl = settings.githubServerUrl || 'https://github.com';
+            const serverHost = new URL(serverUrl).hostname;
+            core.startGroup('🔧 Configuring Submodule Proxy Settings');
+            // Configure proxy for all submodules using foreach
+            const proxyCommands = [
+                `git config http.https://${serverHost}/.proxy "${proxyUrl}"`,
+                `git config http.http://${serverHost}/.proxy "${proxyUrl}"`,
+                `git config http.proxy "${proxyUrl}"`,
+                `git config http.lowSpeedLimit 1000`,
+                `git config http.lowSpeedTime 300`
+            ];
+            for (const command of proxyCommands) {
+                yield git.submoduleForeach(command, settings.nestedSubmodules);
+                core.notice(`✅ Applied to submodules: ${command}`);
+            }
+            // Also configure globally for submodule operations
+            yield git.config('submodule.fetchJobs', '4', true);
+            core.notice('✅ Configured parallel submodule fetching (4 jobs)');
+            core.notice('🎉 Submodule proxy configuration completed!');
+            core.endGroup();
+        }
+        catch (error) {
+            core.warning(`❌ Failed to configure submodule proxy: ${error}`);
+            // Don't throw here, submodule proxy is not critical
         }
     });
 }
@@ -1655,14 +1778,23 @@ function downloadArchive(authToken, owner, repo, ref, commit, baseUrl, proxyUrl)
     return __awaiter(this, void 0, void 0, function* () {
         const serverUrl = (0, url_helper_1.getServerApiUrl)(baseUrl) || 'https://api.github.com';
         const archiveFormat = IS_WINDOWS ? 'zipball' : 'tarball';
-        let url = `${proxyUrl}/${serverUrl}/repos/${owner}/${repo}/${archiveFormat}/${commit || ref}`;
-        if (proxyUrl === undefined) {
-            url = `${proxyUrl}/${url}`;
+        let url = `${serverUrl}/repos/${owner}/${repo}/${archiveFormat}/${commit || ref}`;
+        if (proxyUrl && proxyUrl.trim()) {
+            const originalUrl = url;
+            url = (0, url_helper_1.getProxyUrl)(url, proxyUrl);
+            core.notice('📦 REST API DOWNLOAD WITH PROXY');
+            core.notice(`📦 Repository: ${owner}/${repo}`);
+            core.notice(`📄 Archive format: ${archiveFormat}`);
+            core.notice(`🔗 Original API URL: ${originalUrl}`);
+            core.notice(`🌐 Proxied API URL: ${url}`);
+        }
+        else {
+            core.notice(`📦 REST API Download (direct): ${url}`);
         }
         const response = yield (0, node_fetch_1.default)(url, {
             headers: {
-                'Authorization': `token ${authToken}`,
-                'Accept': 'application/vnd.github.v3+json'
+                Authorization: `token ${authToken}`,
+                Accept: 'application/vnd.github.v3+json'
             }
         });
         if (!response.ok) {
@@ -1840,7 +1972,7 @@ function getInputs() {
         result.githubServerUrl = core.getInput('github-server-url');
         core.debug(`GitHub Host URL = ${result.githubServerUrl}`);
         result.githubProxyUrl = core.getInput('github-proxy-url');
-        core.debug(`GitHub Host URL = ${result.githubProxyUrl}`);
+        core.debug(`GitHub Proxy URL = ${result.githubProxyUrl}`);
         return result;
     });
 }
@@ -2443,25 +2575,59 @@ var __importStar = (this && this.__importStar) || function (mod) {
     __setModuleDefault(result, mod);
     return result;
 };
+var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
+    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+    return new (P || (P = Promise))(function (resolve, reject) {
+        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+        step((generator = generator.apply(thisArg, _arguments || [])).next());
+    });
+};
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.getFetchUrl = getFetchUrl;
 exports.getServerUrl = getServerUrl;
 exports.getServerApiUrl = getServerApiUrl;
 exports.isGhes = isGhes;
+exports.getProxyUrl = getProxyUrl;
+exports.validateProxyUrl = validateProxyUrl;
+exports.testProxyConnection = testProxyConnection;
 const assert = __importStar(__nccwpck_require__(9491));
+const core = __importStar(__nccwpck_require__(2186));
 const url_1 = __nccwpck_require__(7310);
+const node_fetch_1 = __importDefault(__nccwpck_require__(467));
 function getFetchUrl(settings) {
     assert.ok(settings.repositoryOwner, 'settings.repositoryOwner must be defined');
     assert.ok(settings.repositoryName, 'settings.repositoryName must be defined');
     const serviceUrl = getServerUrl(settings.githubServerUrl);
     const encodedOwner = encodeURIComponent(settings.repositoryOwner);
     const encodedName = encodeURIComponent(settings.repositoryName);
+    // SSH key takes precedence
     if (settings.sshKey) {
         const user = settings.sshUser.length > 0 ? settings.sshUser : 'git';
-        return `${user}@${serviceUrl.hostname}:${encodedOwner}/${encodedName}.git`;
+        const sshUrl = `${user}@${serviceUrl.hostname}:${encodedOwner}/${encodedName}.git`;
+        core.info(`🔑 Using SSH URL: ${sshUrl}`);
+        return sshUrl;
     }
-    // "origin" is SCHEME://HOSTNAME[:PORT]
-    return `${serviceUrl.origin}/${encodedOwner}/${encodedName}`;
+    // Build HTTPS URL
+    const originUrl = `${serviceUrl.origin}/${encodedOwner}/${encodedName}`;
+    // Apply proxy if configured
+    if (settings.githubProxyUrl && settings.githubProxyUrl.trim()) {
+        const proxyUrl = getProxyUrl(originUrl, settings.githubProxyUrl);
+        // Enhanced logging for proxy configuration
+        core.notice('🔄 APPLYING PROXY URL TRANSFORMATION');
+        core.notice(`📦 Repository: ${settings.repositoryOwner}/${settings.repositoryName}`);
+        core.notice(`🔗 Original URL: ${originUrl}`);
+        core.notice(`🌐 Proxy prefix: ${settings.githubProxyUrl}`);
+        core.notice(`🎯 Final proxy URL: ${proxyUrl}`);
+        core.notice(`✨ Transformation: ${originUrl !== proxyUrl ? 'APPLIED' : 'NO CHANGE'}`);
+        return proxyUrl;
+    }
+    core.notice(`📡 Using DIRECT connection: ${originUrl}`);
+    return originUrl;
 }
 function getServerUrl(url) {
     let resolvedUrl = process.env['GITHUB_SERVER_URL'] || 'https://github.com';
@@ -2472,12 +2638,12 @@ function getServerUrl(url) {
 }
 function getServerApiUrl(url) {
     if (hasContent(url, WhitespaceMode.Trim)) {
-        let serverUrl = getServerUrl(url);
+        const serverUrl = getServerUrl(url);
         if (isGhes(url)) {
             serverUrl.pathname = 'api/v3';
         }
         else {
-            serverUrl.hostname = 'api.' + serverUrl.hostname;
+            serverUrl.hostname = `api.${serverUrl.hostname}`;
         }
         return pruneSuffix(serverUrl.toString(), '/');
     }
@@ -2508,6 +2674,100 @@ function hasContent(text, whitespaceMode) {
         refinedText = refinedText.trim();
     }
     return refinedText.length > 0;
+}
+function getProxyUrl(originalUrl, proxyPrefix) {
+    if (!proxyPrefix || !proxyPrefix.trim()) {
+        return originalUrl;
+    }
+    const cleanPrefix = proxyPrefix.trim().replace(/\/$/, '');
+    try {
+        // 验证代理前缀是否为有效URL
+        new url_1.URL(cleanPrefix);
+        // 处理不同的代理模式
+        if (cleanPrefix.includes('github.com') || cleanPrefix.includes('ghproxy')) {
+            // GitHub镜像代理模式: https://ghproxy.com/https://github.com/...
+            return `${cleanPrefix}/${originalUrl}`;
+        }
+        else if (cleanPrefix.includes('fastgit') || cleanPrefix.includes('gitclone')) {
+            // FastGit类型代理: 替换域名
+            const originalUrlObj = new url_1.URL(originalUrl);
+            const proxyUrlObj = new url_1.URL(cleanPrefix);
+            originalUrlObj.hostname = proxyUrlObj.hostname;
+            if (proxyUrlObj.port) {
+                originalUrlObj.port = proxyUrlObj.port;
+            }
+            return originalUrlObj.toString();
+        }
+        else {
+            // 通用代理模式: 直接拼接
+            return `${cleanPrefix}/${originalUrl}`;
+        }
+    }
+    catch (error) {
+        core.warning(`Invalid proxy URL format: ${cleanPrefix}, using original URL`);
+        return originalUrl;
+    }
+}
+function validateProxyUrl(proxyUrl) {
+    if (!proxyUrl || !proxyUrl.trim()) {
+        return true; // 空值是有效的（表示不使用代理）
+    }
+    try {
+        const url = new url_1.URL(proxyUrl.trim());
+        return url.protocol === 'http:' || url.protocol === 'https:';
+    }
+    catch (_a) {
+        return false;
+    }
+}
+function testProxyConnection(proxyUrl_1) {
+    return __awaiter(this, arguments, void 0, function* (proxyUrl, targetUrl = 'https://github.com', timeoutMs = 10000) {
+        if (!validateProxyUrl(proxyUrl)) {
+            return { success: false, error: 'Invalid proxy URL format' };
+        }
+        const startTime = Date.now();
+        try {
+            const testUrl = getProxyUrl(targetUrl, proxyUrl);
+            core.debug(`Testing proxy connection to: ${testUrl}`);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+            const response = yield (0, node_fetch_1.default)(testUrl, {
+                method: 'HEAD',
+                signal: controller.signal,
+                headers: {
+                    'User-Agent': 'GitHub-Actions-Checkout-Proxy-Test'
+                }
+            });
+            clearTimeout(timeoutId);
+            const responseTime = Date.now() - startTime;
+            if (response.ok || response.status === 403) {
+                // 403 is acceptable for GitHub (rate limiting)
+                return { success: true, responseTime };
+            }
+            else {
+                return {
+                    success: false,
+                    error: `HTTP ${response.status}: ${response.statusText}`,
+                    responseTime
+                };
+            }
+        }
+        catch (error) {
+            const responseTime = Date.now() - startTime;
+            if (error.name === 'AbortError') {
+                return {
+                    success: false,
+                    error: `Connection timeout after ${timeoutMs}ms`,
+                    responseTime
+                };
+            }
+            return {
+                success: false,
+                error: error.message || 'Unknown connection error',
+                responseTime
+            };
+        }
+    });
 }
 
 
