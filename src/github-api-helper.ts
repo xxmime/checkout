@@ -144,9 +144,20 @@ async function downloadArchive(
   const serverUrl = getServerApiUrl(baseUrl) || 'https://api.github.com'
   const archiveFormat = IS_WINDOWS ? 'zipball' : 'tarball'
   let url = `${serverUrl}/repos/${owner}/${repo}/${archiveFormat}/${commit || ref}`
+
   if (proxyUrl && proxyUrl.trim()) {
+    const originalUrl = url
     url = getProxyUrl(url, proxyUrl)
+    core.startGroup('📦 REST API Download with Proxy')
+    core.info(`Repository: ${owner}/${repo}`)
+    core.info(`Archive format: ${archiveFormat}`)
+    core.info(`Original API URL: ${originalUrl}`)
+    core.info(`Proxied API URL: ${url}`)
+    core.endGroup()
+  } else {
+    core.info(`📦 REST API Download: ${url}`)
   }
+
   const response = await fetch(url, {
     headers: {
       Authorization: `token ${authToken}`,

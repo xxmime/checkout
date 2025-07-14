@@ -2,6 +2,7 @@ import * as assert from 'assert'
 import * as core from '@actions/core'
 import {URL} from 'url'
 import {IGitSourceSettings} from './git-source-settings'
+import fetch from 'node-fetch'
 
 export function getFetchUrl(settings: IGitSourceSettings): string {
   assert.ok(
@@ -9,23 +10,39 @@ export function getFetchUrl(settings: IGitSourceSettings): string {
     'settings.repositoryOwner must be defined'
   )
   assert.ok(settings.repositoryName, 'settings.repositoryName must be defined')
+
   const serviceUrl = getServerUrl(settings.githubServerUrl)
   const encodedOwner = encodeURIComponent(settings.repositoryOwner)
   const encodedName = encodeURIComponent(settings.repositoryName)
+
+  // SSH key takes precedence
   if (settings.sshKey) {
     const user = settings.sshUser.length > 0 ? settings.sshUser : 'git'
-    return `${user}@${serviceUrl.hostname}:${encodedOwner}/${encodedName}.git`
+    const sshUrl = `${user}@${serviceUrl.hostname}:${encodedOwner}/${encodedName}.git`
+    core.info(`🔑 Using SSH URL: ${sshUrl}`)
+    return sshUrl
   }
 
-  // "origin" is SCHEME://HOSTNAME[:PORT]
+  // Build HTTPS URL
   const originUrl = `${serviceUrl.origin}/${encodedOwner}/${encodedName}`
+
+  // Apply proxy if configured
   if (settings.githubProxyUrl && settings.githubProxyUrl.trim()) {
     const proxyUrl = getProxyUrl(originUrl, settings.githubProxyUrl)
-    core.debug(`Original URL: ${originUrl}`)
-    core.debug(`Proxy prefix: ${settings.githubProxyUrl}`)
-    core.debug(`Final proxy URL: ${proxyUrl}`)
+
+    // Enhanced logging for proxy configuration
+    core.startGroup('🌐 Proxy URL Configuration')
+    core.info(`Repository: ${settings.repositoryOwner}/${settings.repositoryName}`)
+    core.info(`Original URL: ${originUrl}`)
+    core.info(`Proxy prefix: ${settings.githubProxyUrl}`)
+    core.info(`Final proxy URL: ${proxyUrl}`)
+    core.info(`URL transformation: ${originUrl !== proxyUrl ? 'Applied' : 'No change'}`)
+    core.endGroup()
+
     return proxyUrl
   }
+
+  core.info(`📡 Using direct URL: ${originUrl}`)
   return originUrl
 }
 
@@ -93,10 +110,106 @@ export function getProxyUrl(
   originalUrl: string,
   proxyPrefix: string | undefined
 ): string {
-  if (proxyPrefix && proxyPrefix.trim()) {
-    // 兼容末尾斜杠
-    const cleanPrefix = proxyPrefix.replace(/\/$/, '')
-    return `${cleanPrefix}/${originalUrl}`
+  if (!proxyPrefix || !proxyPrefix.trim()) {
+    return originalUrl
   }
-  return originalUrl
+
+  const cleanPrefix = proxyPrefix.trim().replace(/\/$/, '')
+
+  try {
+    // 验证代理前缀是否为有效URL
+    new URL(cleanPrefix)
+
+    // 处理不同的代理模式
+    if (cleanPrefix.includes('github.com') || cleanPrefix.includes('ghproxy')) {
+      // GitHub镜像代理模式: https://ghproxy.com/https://github.com/...
+      return `${cleanPrefix}/${originalUrl}`
+    } else if (cleanPrefix.includes('fastgit') || cleanPrefix.includes('gitclone')) {
+      // FastGit类型代理: 替换域名
+      const originalUrlObj = new URL(originalUrl)
+      const proxyUrlObj = new URL(cleanPrefix)
+      originalUrlObj.hostname = proxyUrlObj.hostname
+      if (proxyUrlObj.port) {
+        originalUrlObj.port = proxyUrlObj.port
+      }
+      return originalUrlObj.toString()
+    } else {
+      // 通用代理模式: 直接拼接
+      return `${cleanPrefix}/${originalUrl}`
+    }
+  } catch (error) {
+    core.warning(`Invalid proxy URL format: ${cleanPrefix}, using original URL`)
+    return originalUrl
+  }
+}
+
+export function validateProxyUrl(proxyUrl: string | undefined): boolean {
+  if (!proxyUrl || !proxyUrl.trim()) {
+    return true // 空值是有效的（表示不使用代理）
+  }
+
+  try {
+    const url = new URL(proxyUrl.trim())
+    return url.protocol === 'http:' || url.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+export async function testProxyConnection(
+  proxyUrl: string,
+  targetUrl: string = 'https://github.com',
+  timeoutMs: number = 10000
+): Promise<{success: boolean; error?: string; responseTime?: number}> {
+  if (!validateProxyUrl(proxyUrl)) {
+    return {success: false, error: 'Invalid proxy URL format'}
+  }
+
+  const startTime = Date.now()
+
+  try {
+    const testUrl = getProxyUrl(targetUrl, proxyUrl)
+    core.debug(`Testing proxy connection to: ${testUrl}`)
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+    const response = await fetch(testUrl, {
+      method: 'HEAD',
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'GitHub-Actions-Checkout-Proxy-Test'
+      }
+    })
+
+    clearTimeout(timeoutId)
+    const responseTime = Date.now() - startTime
+
+    if (response.ok || response.status === 403) {
+      // 403 is acceptable for GitHub (rate limiting)
+      return {success: true, responseTime}
+    } else {
+      return {
+        success: false,
+        error: `HTTP ${response.status}: ${response.statusText}`,
+        responseTime
+      }
+    }
+  } catch (error: any) {
+    const responseTime = Date.now() - startTime
+
+    if (error.name === 'AbortError') {
+      return {
+        success: false,
+        error: `Connection timeout after ${timeoutMs}ms`,
+        responseTime
+      }
+    }
+
+    return {
+      success: false,
+      error: error.message || 'Unknown connection error',
+      responseTime
+    }
+  }
 }

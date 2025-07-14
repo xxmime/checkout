@@ -20,6 +20,19 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
   core.info(
     `Syncing repository: ${settings.repositoryOwner}/${settings.repositoryName}`
   )
+
+  // Log proxy configuration details
+  if (settings.githubProxyUrl) {
+    core.startGroup('🚀 Proxy Configuration Summary')
+    core.info(`Proxy URL: ${settings.githubProxyUrl}`)
+    core.info(`GitHub Server: ${settings.githubServerUrl || 'https://github.com'}`)
+    core.info(`Repository: ${settings.repositoryOwner}/${settings.repositoryName}`)
+    core.info(`SSH Key: ${settings.sshKey ? 'Configured' : 'Not configured'}`)
+    core.info(`LFS: ${settings.lfs ? 'Enabled' : 'Disabled'}`)
+    core.info(`Submodules: ${settings.submodules ? 'Enabled' : 'Disabled'}`)
+    core.endGroup()
+  }
+
   const repositoryUrl = urlHelper.getFetchUrl(settings)
 
   // Remove conflicting file path
@@ -37,8 +50,10 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
   // Git command manager
   core.startGroup('Getting Git version info')
   const git = await getGitCommandManager(settings)
-  if (settings.githubProxyUrl) {
-    await git.config(`http.https://github.com/.proxy`, settings.githubProxyUrl)
+
+  // Configure proxy settings for git operations
+  if (git && settings.githubProxyUrl) {
+    await configureGitProxy(git, settings)
   }
   core.endGroup()
 
@@ -246,6 +261,13 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
       await authHelper.configureGlobalAuth()
       core.endGroup()
 
+      // Configure proxy for submodules
+      if (settings.githubProxyUrl) {
+        core.startGroup('Configuring proxy for submodules')
+        await configureSubmoduleProxy(git, settings)
+        core.endGroup()
+      }
+
       // Checkout submodules
       core.startGroup('Fetching submodules')
       await git.submoduleSync(settings.nestedSubmodules)
@@ -335,6 +357,102 @@ export async function cleanup(repositoryPath: string): Promise<void> {
     await authHelper.removeAuth()
   } finally {
     await authHelper.removeGlobalConfig()
+  }
+}
+
+async function configureGitProxy(
+  git: IGitCommandManager,
+  settings: IGitSourceSettings
+): Promise<void> {
+  const proxyUrl = settings.githubProxyUrl?.trim()
+  if (!proxyUrl) {
+    return
+  }
+
+  core.startGroup('Configuring Git proxy settings')
+
+  try {
+    // Validate proxy URL format
+    if (!urlHelper.validateProxyUrl(proxyUrl)) {
+      throw new Error(`Invalid proxy URL format: ${proxyUrl}`)
+    }
+
+    // Test proxy connection
+    core.info('Testing proxy connection...')
+    const testResult = await urlHelper.testProxyConnection(proxyUrl, settings.githubServerUrl)
+
+    if (testResult.success) {
+      core.info(`✓ Proxy connection test successful (${testResult.responseTime}ms)`)
+    } else {
+      core.warning(`⚠ Proxy connection test failed: ${testResult.error}`)
+      core.warning('Proceeding with proxy configuration anyway...')
+    }
+
+    const serverUrl = settings.githubServerUrl || 'https://github.com'
+    const serverHost = new URL(serverUrl).hostname
+
+    // Configure HTTP proxy for the specific GitHub server
+    const httpProxyKey = `http.https://${serverHost}/.proxy`
+    await git.config(httpProxyKey, proxyUrl)
+    core.info(`✓ Configured HTTP proxy: ${httpProxyKey} = ${proxyUrl}`)
+
+    // Also configure for HTTP if the server supports it
+    const httpKey = `http.http://${serverHost}/.proxy`
+    await git.config(httpKey, proxyUrl)
+    core.info(`✓ Configured HTTP proxy: ${httpKey} = ${proxyUrl}`)
+
+    // Configure proxy for submodules
+    await git.config('http.proxy', proxyUrl)
+    core.info(`✓ Configured global HTTP proxy: http.proxy = ${proxyUrl}`)
+
+    // Set proxy timeout and other related settings
+    await git.config('http.lowSpeedLimit', '1000')
+    await git.config('http.lowSpeedTime', '300')
+    await git.config('http.postBuffer', '524288000') // 500MB buffer for large repos
+    core.info('✓ Configured HTTP timeout and buffer settings')
+
+  } catch (error) {
+    core.warning(`Failed to configure Git proxy: ${error}`)
+    throw error
+  } finally {
+    core.endGroup()
+  }
+}
+
+async function configureSubmoduleProxy(
+  git: IGitCommandManager,
+  settings: IGitSourceSettings
+): Promise<void> {
+  const proxyUrl = settings.githubProxyUrl?.trim()
+  if (!proxyUrl) {
+    return
+  }
+
+  try {
+    const serverUrl = settings.githubServerUrl || 'https://github.com'
+    const serverHost = new URL(serverUrl).hostname
+
+    // Configure proxy for all submodules using foreach
+    const proxyCommands = [
+      `git config http.https://${serverHost}/.proxy "${proxyUrl}"`,
+      `git config http.http://${serverHost}/.proxy "${proxyUrl}"`,
+      `git config http.proxy "${proxyUrl}"`,
+      `git config http.lowSpeedLimit 1000`,
+      `git config http.lowSpeedTime 300`
+    ]
+
+    for (const command of proxyCommands) {
+      await git.submoduleForeach(command, settings.nestedSubmodules)
+      core.info(`✓ Applied to submodules: ${command}`)
+    }
+
+    // Also configure globally for submodule operations
+    await git.config('submodule.fetchJobs', '4', true)
+    core.info('✓ Configured parallel submodule fetching')
+
+  } catch (error) {
+    core.warning(`Failed to configure submodule proxy: ${error}`)
+    // Don't throw here, submodule proxy is not critical
   }
 }
 
