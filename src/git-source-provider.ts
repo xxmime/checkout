@@ -21,16 +21,21 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
     `Syncing repository: ${settings.repositoryOwner}/${settings.repositoryName}`
   )
 
-  // Log proxy configuration details
+  // Log proxy configuration details prominently
   if (settings.githubProxyUrl) {
-    core.startGroup('🚀 Proxy Configuration Summary')
-    core.info(`Proxy URL: ${settings.githubProxyUrl}`)
-    core.info(`GitHub Server: ${settings.githubServerUrl || 'https://github.com'}`)
-    core.info(`Repository: ${settings.repositoryOwner}/${settings.repositoryName}`)
+    core.notice('🌐 PROXY ACCELERATION ENABLED')
+    core.notice(`📍 Proxy URL: ${settings.githubProxyUrl}`)
+    core.notice(`🎯 Target Server: ${settings.githubServerUrl || 'https://github.com'}`)
+    core.notice(`📦 Repository: ${settings.repositoryOwner}/${settings.repositoryName}`)
+
+    core.startGroup('🚀 Proxy Configuration Details')
     core.info(`SSH Key: ${settings.sshKey ? 'Configured' : 'Not configured'}`)
     core.info(`LFS: ${settings.lfs ? 'Enabled' : 'Disabled'}`)
     core.info(`Submodules: ${settings.submodules ? 'Enabled' : 'Disabled'}`)
+    core.info(`Fetch Depth: ${settings.fetchDepth}`)
     core.endGroup()
+  } else {
+    core.notice('📡 Using direct connection (no proxy)')
   }
 
   const repositoryUrl = urlHelper.getFetchUrl(settings)
@@ -50,12 +55,12 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
   // Git command manager
   core.startGroup('Getting Git version info')
   const git = await getGitCommandManager(settings)
+  core.endGroup()
 
-  // Configure proxy settings for git operations
+  // Configure proxy settings for git operations (separate group for visibility)
   if (git && settings.githubProxyUrl) {
     await configureGitProxy(git, settings)
   }
-  core.endGroup()
 
   let authHelper: gitAuthHelper.IGitAuthHelper | null = null
   try {
@@ -263,9 +268,8 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
 
       // Configure proxy for submodules
       if (settings.githubProxyUrl) {
-        core.startGroup('Configuring proxy for submodules')
+        core.notice('🔧 Configuring proxy for submodules...')
         await configureSubmoduleProxy(git, settings)
-        core.endGroup()
       }
 
       // Checkout submodules
@@ -369,23 +373,25 @@ async function configureGitProxy(
     return
   }
 
-  core.startGroup('Configuring Git proxy settings')
+  core.startGroup('⚙️ CONFIGURING GIT PROXY SETTINGS')
 
   try {
     // Validate proxy URL format
     if (!urlHelper.validateProxyUrl(proxyUrl)) {
+      core.error(`❌ Invalid proxy URL format: ${proxyUrl}`)
       throw new Error(`Invalid proxy URL format: ${proxyUrl}`)
     }
+    core.notice(`✅ Proxy URL validation passed: ${proxyUrl}`)
 
     // Test proxy connection
-    core.info('Testing proxy connection...')
+    core.notice('🔍 Testing proxy connection...')
     const testResult = await urlHelper.testProxyConnection(proxyUrl, settings.githubServerUrl)
 
     if (testResult.success) {
-      core.info(`✓ Proxy connection test successful (${testResult.responseTime}ms)`)
+      core.notice(`🚀 Proxy connection test SUCCESSFUL (${testResult.responseTime}ms)`)
     } else {
-      core.warning(`⚠ Proxy connection test failed: ${testResult.error}`)
-      core.warning('Proceeding with proxy configuration anyway...')
+      core.warning(`⚠️ Proxy connection test FAILED: ${testResult.error}`)
+      core.warning('⏭️ Proceeding with proxy configuration anyway...')
     }
 
     const serverUrl = settings.githubServerUrl || 'https://github.com'
@@ -394,25 +400,27 @@ async function configureGitProxy(
     // Configure HTTP proxy for the specific GitHub server
     const httpProxyKey = `http.https://${serverHost}/.proxy`
     await git.config(httpProxyKey, proxyUrl)
-    core.info(`✓ Configured HTTP proxy: ${httpProxyKey} = ${proxyUrl}`)
+    core.notice(`✅ Configured HTTPS proxy: ${httpProxyKey} = ${proxyUrl}`)
 
     // Also configure for HTTP if the server supports it
     const httpKey = `http.http://${serverHost}/.proxy`
     await git.config(httpKey, proxyUrl)
-    core.info(`✓ Configured HTTP proxy: ${httpKey} = ${proxyUrl}`)
+    core.notice(`✅ Configured HTTP proxy: ${httpKey} = ${proxyUrl}`)
 
     // Configure proxy for submodules
     await git.config('http.proxy', proxyUrl)
-    core.info(`✓ Configured global HTTP proxy: http.proxy = ${proxyUrl}`)
+    core.notice(`✅ Configured global HTTP proxy: http.proxy = ${proxyUrl}`)
 
     // Set proxy timeout and other related settings
     await git.config('http.lowSpeedLimit', '1000')
     await git.config('http.lowSpeedTime', '300')
     await git.config('http.postBuffer', '524288000') // 500MB buffer for large repos
-    core.info('✓ Configured HTTP timeout and buffer settings')
+    core.notice('✅ Configured HTTP timeout and buffer settings')
+
+    core.notice('🎉 Git proxy configuration completed successfully!')
 
   } catch (error) {
-    core.warning(`Failed to configure Git proxy: ${error}`)
+    core.error(`❌ Failed to configure Git proxy: ${error}`)
     throw error
   } finally {
     core.endGroup()
@@ -432,6 +440,8 @@ async function configureSubmoduleProxy(
     const serverUrl = settings.githubServerUrl || 'https://github.com'
     const serverHost = new URL(serverUrl).hostname
 
+    core.startGroup('🔧 Configuring Submodule Proxy Settings')
+
     // Configure proxy for all submodules using foreach
     const proxyCommands = [
       `git config http.https://${serverHost}/.proxy "${proxyUrl}"`,
@@ -443,15 +453,18 @@ async function configureSubmoduleProxy(
 
     for (const command of proxyCommands) {
       await git.submoduleForeach(command, settings.nestedSubmodules)
-      core.info(`✓ Applied to submodules: ${command}`)
+      core.notice(`✅ Applied to submodules: ${command}`)
     }
 
     // Also configure globally for submodule operations
     await git.config('submodule.fetchJobs', '4', true)
-    core.info('✓ Configured parallel submodule fetching')
+    core.notice('✅ Configured parallel submodule fetching (4 jobs)')
+
+    core.notice('🎉 Submodule proxy configuration completed!')
+    core.endGroup()
 
   } catch (error) {
-    core.warning(`Failed to configure submodule proxy: ${error}`)
+    core.warning(`❌ Failed to configure submodule proxy: ${error}`)
     // Don't throw here, submodule proxy is not critical
   }
 }

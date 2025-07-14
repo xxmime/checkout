@@ -31,18 +31,17 @@ export function getFetchUrl(settings: IGitSourceSettings): string {
     const proxyUrl = getProxyUrl(originUrl, settings.githubProxyUrl)
 
     // Enhanced logging for proxy configuration
-    core.startGroup('🌐 Proxy URL Configuration')
-    core.info(`Repository: ${settings.repositoryOwner}/${settings.repositoryName}`)
-    core.info(`Original URL: ${originUrl}`)
-    core.info(`Proxy prefix: ${settings.githubProxyUrl}`)
-    core.info(`Final proxy URL: ${proxyUrl}`)
-    core.info(`URL transformation: ${originUrl !== proxyUrl ? 'Applied' : 'No change'}`)
-    core.endGroup()
+    core.notice('🔄 APPLYING PROXY URL TRANSFORMATION')
+    core.notice(`📦 Repository: ${settings.repositoryOwner}/${settings.repositoryName}`)
+    core.notice(`🔗 Original URL: ${originUrl}`)
+    core.notice(`🌐 Proxy prefix: ${settings.githubProxyUrl}`)
+    core.notice(`🎯 Final proxy URL: ${proxyUrl}`)
+    core.notice(`✨ Transformation: ${originUrl !== proxyUrl ? 'APPLIED' : 'NO CHANGE'}`)
 
     return proxyUrl
   }
 
-  core.info(`📡 Using direct URL: ${originUrl}`)
+  core.notice(`📡 Using DIRECT connection: ${originUrl}`)
   return originUrl
 }
 

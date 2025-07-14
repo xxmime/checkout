@@ -148,14 +148,13 @@ async function downloadArchive(
   if (proxyUrl && proxyUrl.trim()) {
     const originalUrl = url
     url = getProxyUrl(url, proxyUrl)
-    core.startGroup('📦 REST API Download with Proxy')
-    core.info(`Repository: ${owner}/${repo}`)
-    core.info(`Archive format: ${archiveFormat}`)
-    core.info(`Original API URL: ${originalUrl}`)
-    core.info(`Proxied API URL: ${url}`)
-    core.endGroup()
+    core.notice('📦 REST API DOWNLOAD WITH PROXY')
+    core.notice(`📦 Repository: ${owner}/${repo}`)
+    core.notice(`📄 Archive format: ${archiveFormat}`)
+    core.notice(`🔗 Original API URL: ${originalUrl}`)
+    core.notice(`🌐 Proxied API URL: ${url}`)
   } else {
-    core.info(`📦 REST API Download: ${url}`)
+    core.notice(`📦 REST API Download (direct): ${url}`)
   }
 
   const response = await fetch(url, {
