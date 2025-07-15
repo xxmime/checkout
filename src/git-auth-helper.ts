@@ -79,6 +79,9 @@ class GitAuthHelper {
     // Configure new values
     await this.configureSsh()
     await this.configureToken()
+
+    // Configure proxy auth if needed
+    await this.configureProxyAuth()
   }
 
   async configureTempGlobalConfig(): Promise<string> {
@@ -318,6 +321,30 @@ class GitAuthHelper {
     await fs.promises.writeFile(configPath, content)
   }
 
+  private async replaceProxyTokenPlaceholder(configPath: string, proxyAuthKey: string): Promise<void> {
+    assert.ok(configPath, 'configPath is not defined')
+    let content = (await fs.promises.readFile(configPath)).toString()
+
+    // Find the specific proxy auth key line and replace its placeholder
+    const lines = content.split('\n')
+    let replaced = false
+
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].includes(proxyAuthKey) && lines[i].includes(this.tokenPlaceholderConfigValue)) {
+        lines[i] = lines[i].replace(this.tokenPlaceholderConfigValue, this.tokenConfigValue)
+        replaced = true
+        break
+      }
+    }
+
+    if (!replaced) {
+      throw new Error(`Unable to replace proxy auth placeholder for ${proxyAuthKey} in ${configPath}`)
+    }
+
+    content = lines.join('\n')
+    await fs.promises.writeFile(configPath, content)
+  }
+
   private async removeSsh(): Promise<void> {
     // SSH key
     const keyPath = this.sshKeyPath || stateHelper.SshKeyPath
@@ -348,6 +375,61 @@ class GitAuthHelper {
   private async removeToken(): Promise<void> {
     // HTTP extra header
     await this.removeGitConfig(this.tokenConfigKey)
+
+    // Remove proxy auth if configured
+    await this.removeProxyAuth()
+  }
+
+  /**
+   * 为代理URL配置认证头（当使用带认证的代理URL时）
+   */
+  private async configureProxyAuth(): Promise<void> {
+    // 检查是否使用了带认证的代理URL
+    if (!this.settings.githubProxyUrl || !this.settings.authToken) {
+      return
+    }
+
+    try {
+      const proxyUrlObj = new URL(this.settings.githubProxyUrl.trim())
+      const hasProxyAuth = !!(proxyUrlObj.username && proxyUrlObj.password)
+
+      if (hasProxyAuth) {
+        // 为代理域名配置认证头
+        const proxyAuthKey = `http.${proxyUrlObj.protocol}//${proxyUrlObj.hostname}/.extraheader`
+
+        core.debug(`🔧 Configuring proxy auth for: ${proxyUrlObj.hostname}`)
+
+        // Get config path
+        const configPath = path.join(this.git.getWorkingDirectory(), '.git', 'config')
+
+        // Configure a placeholder value first
+        await this.git.config(proxyAuthKey, this.tokenPlaceholderConfigValue)
+
+        // Replace with actual token
+        await this.replaceProxyTokenPlaceholder(configPath, proxyAuthKey)
+
+        core.debug(`✅ Configured proxy auth: ${proxyAuthKey}`)
+      }
+    } catch (error) {
+      core.debug(`Failed to configure proxy auth: ${error}`)
+    }
+  }
+
+  /**
+   * 移除代理认证配置
+   */
+  private async removeProxyAuth(): Promise<void> {
+    if (!this.settings.githubProxyUrl) {
+      return
+    }
+
+    try {
+      const proxyUrlObj = new URL(this.settings.githubProxyUrl.trim())
+      const proxyAuthKey = `http.${proxyUrlObj.protocol}//${proxyUrlObj.hostname}/.extraheader`
+      await this.removeGitConfig(proxyAuthKey)
+    } catch (error) {
+      core.debug(`Failed to remove proxy auth: ${error}`)
+    }
   }
 
   private async removeGitConfig(

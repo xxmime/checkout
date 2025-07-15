@@ -185,6 +185,8 @@ class GitAuthHelper {
             // Configure new values
             yield this.configureSsh();
             yield this.configureToken();
+            // Configure proxy auth if needed
+            yield this.configureProxyAuth();
         });
     }
     configureTempGlobalConfig() {
@@ -381,6 +383,27 @@ class GitAuthHelper {
             yield fs.promises.writeFile(configPath, content);
         });
     }
+    replaceProxyTokenPlaceholder(configPath, proxyAuthKey) {
+        return __awaiter(this, void 0, void 0, function* () {
+            assert.ok(configPath, 'configPath is not defined');
+            let content = (yield fs.promises.readFile(configPath)).toString();
+            // Find the specific proxy auth key line and replace its placeholder
+            const lines = content.split('\n');
+            let replaced = false;
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].includes(proxyAuthKey) && lines[i].includes(this.tokenPlaceholderConfigValue)) {
+                    lines[i] = lines[i].replace(this.tokenPlaceholderConfigValue, this.tokenConfigValue);
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) {
+                throw new Error(`Unable to replace proxy auth placeholder for ${proxyAuthKey} in ${configPath}`);
+            }
+            content = lines.join('\n');
+            yield fs.promises.writeFile(configPath, content);
+        });
+    }
     removeSsh() {
         return __awaiter(this, void 0, void 0, function* () {
             var _a;
@@ -413,6 +436,56 @@ class GitAuthHelper {
         return __awaiter(this, void 0, void 0, function* () {
             // HTTP extra header
             yield this.removeGitConfig(this.tokenConfigKey);
+            // Remove proxy auth if configured
+            yield this.removeProxyAuth();
+        });
+    }
+    /**
+     * 为代理URL配置认证头（当使用带认证的代理URL时）
+     */
+    configureProxyAuth() {
+        return __awaiter(this, void 0, void 0, function* () {
+            // 检查是否使用了带认证的代理URL
+            if (!this.settings.githubProxyUrl || !this.settings.authToken) {
+                return;
+            }
+            try {
+                const proxyUrlObj = new URL(this.settings.githubProxyUrl.trim());
+                const hasProxyAuth = !!(proxyUrlObj.username && proxyUrlObj.password);
+                if (hasProxyAuth) {
+                    // 为代理域名配置认证头
+                    const proxyAuthKey = `http.${proxyUrlObj.protocol}//${proxyUrlObj.hostname}/.extraheader`;
+                    core.debug(`🔧 Configuring proxy auth for: ${proxyUrlObj.hostname}`);
+                    // Get config path
+                    const configPath = path.join(this.git.getWorkingDirectory(), '.git', 'config');
+                    // Configure a placeholder value first
+                    yield this.git.config(proxyAuthKey, this.tokenPlaceholderConfigValue);
+                    // Replace with actual token
+                    yield this.replaceProxyTokenPlaceholder(configPath, proxyAuthKey);
+                    core.debug(`✅ Configured proxy auth: ${proxyAuthKey}`);
+                }
+            }
+            catch (error) {
+                core.debug(`Failed to configure proxy auth: ${error}`);
+            }
+        });
+    }
+    /**
+     * 移除代理认证配置
+     */
+    removeProxyAuth() {
+        return __awaiter(this, void 0, void 0, function* () {
+            if (!this.settings.githubProxyUrl) {
+                return;
+            }
+            try {
+                const proxyUrlObj = new URL(this.settings.githubProxyUrl.trim());
+                const proxyAuthKey = `http.${proxyUrlObj.protocol}//${proxyUrlObj.hostname}/.extraheader`;
+                yield this.removeGitConfig(proxyAuthKey);
+            }
+            catch (error) {
+                core.debug(`Failed to remove proxy auth: ${error}`);
+            }
         });
     }
     removeGitConfig(configKey_1) {
