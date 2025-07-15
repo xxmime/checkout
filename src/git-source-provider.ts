@@ -24,7 +24,7 @@ export async function getSource(settings: IGitSourceSettings): Promise<void> {
   // Log proxy configuration details prominently
   if (settings.githubProxyUrl && settings.githubProxyUrl.trim()) {
     core.notice('🌐 PROXY ACCELERATION ENABLED')
-    core.notice(`📍 Proxy URL: ${settings.githubProxyUrl}`)
+    core.notice(`📍 Proxy URL: ${urlHelper.hideUrlCredentials(settings.githubProxyUrl)}`)
     core.notice(`🎯 Target Server: ${settings.githubServerUrl || 'https://github.com'}`)
     core.notice(`📦 Repository: ${settings.repositoryOwner}/${settings.repositoryName}`)
 
@@ -381,35 +381,95 @@ async function configureGitProxy(
       core.error(`❌ Invalid proxy URL format: ${proxyUrl}`)
       throw new Error(`Invalid proxy URL format: ${proxyUrl}`)
     }
-    core.notice(`✅ Proxy URL validation passed: ${proxyUrl}`)
+    core.notice(`✅ Proxy URL validation passed: ${urlHelper.hideUrlCredentials(proxyUrl)}`)
 
-    // Test proxy connection
-    core.notice('🔍 Testing proxy connection...')
-    const testResult = await urlHelper.testProxyConnection(proxyUrl, settings.githubServerUrl)
-
-    if (testResult.success) {
-      core.notice(`🚀 Proxy connection test SUCCESSFUL (${testResult.responseTime}ms)`)
-    } else {
-      core.warning(`⚠️ Proxy connection test FAILED: ${testResult.error}`)
-      core.warning('⏭️ Proceeding with proxy configuration anyway...')
+    // Check if proxy URL contains embedded authentication
+    let parsedProxyUrl: URL
+    try {
+      parsedProxyUrl = new URL(proxyUrl)
+    } catch (error) {
+      core.error(`❌ Failed to parse proxy URL: ${proxyUrl}`)
+      throw new Error(`Invalid proxy URL format: ${proxyUrl}`)
     }
 
-    const serverUrl = settings.githubServerUrl || 'https://github.com'
-    const serverHost = new URL(serverUrl).hostname
+    const hasEmbeddedAuth = parsedProxyUrl.username && parsedProxyUrl.password
 
-    // Configure HTTP proxy for the specific GitHub server
-    const httpProxyKey = `http.https://${serverHost}/.proxy`
-    await git.config(httpProxyKey, proxyUrl)
-    core.notice(`✅ Configured HTTPS proxy: ${httpProxyKey} = ${proxyUrl}`)
+    if (hasEmbeddedAuth) {
+      core.notice('🔐 Detected embedded authentication in proxy URL')
 
-    // Also configure for HTTP if the server supports it
-    const httpKey = `http.http://${serverHost}/.proxy`
-    await git.config(httpKey, proxyUrl)
-    core.notice(`✅ Configured HTTP proxy: ${httpKey} = ${proxyUrl}`)
+      // 检查是否为直接认证格式
+      // 格式1: https://username:password@proxy.com/ (加速服务)
+      // 格式2: https://username:password@github.com/org/repo (直接GitHub认证)
+      const isDirectGithubAuth = parsedProxyUrl.hostname.toLowerCase() === 'github.com'
+      const hasMinimalPath = !parsedProxyUrl.pathname || parsedProxyUrl.pathname === '/' || parsedProxyUrl.pathname === ''
+      const isAcceleratorService = hasMinimalPath && !isDirectGithubAuth
 
-    // Configure proxy for submodules
-    await git.config('http.proxy', proxyUrl)
-    core.notice(`✅ Configured global HTTP proxy: http.proxy = ${proxyUrl}`)
+      if (isDirectGithubAuth || isAcceleratorService) {
+        if (isDirectGithubAuth) {
+          core.notice('🔧 Direct GitHub authentication detected')
+        } else {
+          core.notice('🔧 Accelerator service with embedded authentication detected')
+          core.notice(`📍 Accelerator domain: ${parsedProxyUrl.hostname}`)
+        }
+        core.notice('✅ Authentication will be handled directly in repository URL')
+        core.notice('⏭️ Skipping Git proxy configuration to avoid credential conflicts')
+        return
+      }
+
+      // For proxy prefix patterns with auth, we need to configure Git proxy
+      // but extract the credentials for separate configuration
+      const proxyWithoutAuth = `${parsedProxyUrl.protocol}//${parsedProxyUrl.host}${parsedProxyUrl.pathname}`
+      core.notice(`🔧 Using proxy URL without embedded auth for Git config: ${proxyWithoutAuth}`)
+
+      // Configure Git proxy without authentication
+      const serverUrl = settings.githubServerUrl || 'https://github.com'
+      const serverHost = new URL(serverUrl).hostname
+      const httpProxyKey = `http.https://${serverHost}/.proxy`
+      await git.config(httpProxyKey, proxyWithoutAuth)
+      core.notice(`✅ Configured HTTPS proxy: ${httpProxyKey} = ${proxyWithoutAuth}`)
+
+      const httpKey = `http.http://${serverHost}/.proxy`
+      await git.config(httpKey, proxyWithoutAuth)
+      core.notice(`✅ Configured HTTP proxy: ${httpKey} = ${proxyWithoutAuth}`)
+
+      await git.config('http.proxy', proxyWithoutAuth)
+      core.notice(`✅ Configured global HTTP proxy: http.proxy = ${proxyWithoutAuth}`)
+
+      // Note: Authentication will be handled by the transformed repository URL
+      core.notice('🔐 Proxy authentication will be handled via repository URL transformation')
+
+    } else {
+      // Standard proxy configuration without embedded authentication
+      core.notice('🌐 Standard proxy configuration (no embedded authentication)')
+
+      // Test proxy connection
+      core.notice('🔍 Testing proxy connection...')
+      const testResult = await urlHelper.testProxyConnection(proxyUrl, settings.githubServerUrl)
+
+      if (testResult.success) {
+        core.notice(`🚀 Proxy connection test SUCCESSFUL (${testResult.responseTime}ms)`)
+      } else {
+        core.warning(`⚠️ Proxy connection test FAILED: ${testResult.error}`)
+        core.warning('⏭️ Proceeding with proxy configuration anyway...')
+      }
+
+      const serverUrl = settings.githubServerUrl || 'https://github.com'
+      const serverHost = new URL(serverUrl).hostname
+
+      // Configure HTTP proxy for the specific GitHub server
+      const httpProxyKey = `http.https://${serverHost}/.proxy`
+      await git.config(httpProxyKey, proxyUrl)
+      core.notice(`✅ Configured HTTPS proxy: ${httpProxyKey} = ${urlHelper.hideUrlCredentials(proxyUrl)}`)
+
+      // Also configure for HTTP if the server supports it
+      const httpKey = `http.http://${serverHost}/.proxy`
+      await git.config(httpKey, proxyUrl)
+      core.notice(`✅ Configured HTTP proxy: ${httpKey} = ${urlHelper.hideUrlCredentials(proxyUrl)}`)
+
+      // Configure proxy for submodules
+      await git.config('http.proxy', proxyUrl)
+      core.notice(`✅ Configured global HTTP proxy: http.proxy = ${urlHelper.hideUrlCredentials(proxyUrl)}`)
+    }
 
     // Set proxy timeout and other related settings
     await git.config('http.lowSpeedLimit', '1000')

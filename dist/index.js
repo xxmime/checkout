@@ -1190,7 +1190,7 @@ function getSource(settings) {
         // Log proxy configuration details prominently
         if (settings.githubProxyUrl && settings.githubProxyUrl.trim()) {
             core.notice('🌐 PROXY ACCELERATION ENABLED');
-            core.notice(`📍 Proxy URL: ${settings.githubProxyUrl}`);
+            core.notice(`📍 Proxy URL: ${urlHelper.hideUrlCredentials(settings.githubProxyUrl)}`);
             core.notice(`🎯 Target Server: ${settings.githubServerUrl || 'https://github.com'}`);
             core.notice(`📦 Repository: ${settings.repositoryOwner}/${settings.repositoryName}`);
             core.startGroup('🚀 Proxy Configuration Details');
@@ -1454,30 +1454,82 @@ function configureGitProxy(git, settings) {
                 core.error(`❌ Invalid proxy URL format: ${proxyUrl}`);
                 throw new Error(`Invalid proxy URL format: ${proxyUrl}`);
             }
-            core.notice(`✅ Proxy URL validation passed: ${proxyUrl}`);
-            // Test proxy connection
-            core.notice('🔍 Testing proxy connection...');
-            const testResult = yield urlHelper.testProxyConnection(proxyUrl, settings.githubServerUrl);
-            if (testResult.success) {
-                core.notice(`🚀 Proxy connection test SUCCESSFUL (${testResult.responseTime}ms)`);
+            core.notice(`✅ Proxy URL validation passed: ${urlHelper.hideUrlCredentials(proxyUrl)}`);
+            // Check if proxy URL contains embedded authentication
+            let parsedProxyUrl;
+            try {
+                parsedProxyUrl = new URL(proxyUrl);
+            }
+            catch (error) {
+                core.error(`❌ Failed to parse proxy URL: ${proxyUrl}`);
+                throw new Error(`Invalid proxy URL format: ${proxyUrl}`);
+            }
+            const hasEmbeddedAuth = parsedProxyUrl.username && parsedProxyUrl.password;
+            if (hasEmbeddedAuth) {
+                core.notice('🔐 Detected embedded authentication in proxy URL');
+                // 检查是否为直接认证格式
+                // 格式1: https://username:password@proxy.com/ (加速服务)
+                // 格式2: https://username:password@github.com/org/repo (直接GitHub认证)
+                const isDirectGithubAuth = parsedProxyUrl.hostname.toLowerCase() === 'github.com';
+                const hasMinimalPath = !parsedProxyUrl.pathname || parsedProxyUrl.pathname === '/' || parsedProxyUrl.pathname === '';
+                const isAcceleratorService = hasMinimalPath && !isDirectGithubAuth;
+                if (isDirectGithubAuth || isAcceleratorService) {
+                    if (isDirectGithubAuth) {
+                        core.notice('🔧 Direct GitHub authentication detected');
+                    }
+                    else {
+                        core.notice('🔧 Accelerator service with embedded authentication detected');
+                        core.notice(`📍 Accelerator domain: ${parsedProxyUrl.hostname}`);
+                    }
+                    core.notice('✅ Authentication will be handled directly in repository URL');
+                    core.notice('⏭️ Skipping Git proxy configuration to avoid credential conflicts');
+                    return;
+                }
+                // For proxy prefix patterns with auth, we need to configure Git proxy
+                // but extract the credentials for separate configuration
+                const proxyWithoutAuth = `${parsedProxyUrl.protocol}//${parsedProxyUrl.host}${parsedProxyUrl.pathname}`;
+                core.notice(`🔧 Using proxy URL without embedded auth for Git config: ${proxyWithoutAuth}`);
+                // Configure Git proxy without authentication
+                const serverUrl = settings.githubServerUrl || 'https://github.com';
+                const serverHost = new URL(serverUrl).hostname;
+                const httpProxyKey = `http.https://${serverHost}/.proxy`;
+                yield git.config(httpProxyKey, proxyWithoutAuth);
+                core.notice(`✅ Configured HTTPS proxy: ${httpProxyKey} = ${proxyWithoutAuth}`);
+                const httpKey = `http.http://${serverHost}/.proxy`;
+                yield git.config(httpKey, proxyWithoutAuth);
+                core.notice(`✅ Configured HTTP proxy: ${httpKey} = ${proxyWithoutAuth}`);
+                yield git.config('http.proxy', proxyWithoutAuth);
+                core.notice(`✅ Configured global HTTP proxy: http.proxy = ${proxyWithoutAuth}`);
+                // Note: Authentication will be handled by the transformed repository URL
+                core.notice('🔐 Proxy authentication will be handled via repository URL transformation');
             }
             else {
-                core.warning(`⚠️ Proxy connection test FAILED: ${testResult.error}`);
-                core.warning('⏭️ Proceeding with proxy configuration anyway...');
+                // Standard proxy configuration without embedded authentication
+                core.notice('🌐 Standard proxy configuration (no embedded authentication)');
+                // Test proxy connection
+                core.notice('🔍 Testing proxy connection...');
+                const testResult = yield urlHelper.testProxyConnection(proxyUrl, settings.githubServerUrl);
+                if (testResult.success) {
+                    core.notice(`🚀 Proxy connection test SUCCESSFUL (${testResult.responseTime}ms)`);
+                }
+                else {
+                    core.warning(`⚠️ Proxy connection test FAILED: ${testResult.error}`);
+                    core.warning('⏭️ Proceeding with proxy configuration anyway...');
+                }
+                const serverUrl = settings.githubServerUrl || 'https://github.com';
+                const serverHost = new URL(serverUrl).hostname;
+                // Configure HTTP proxy for the specific GitHub server
+                const httpProxyKey = `http.https://${serverHost}/.proxy`;
+                yield git.config(httpProxyKey, proxyUrl);
+                core.notice(`✅ Configured HTTPS proxy: ${httpProxyKey} = ${urlHelper.hideUrlCredentials(proxyUrl)}`);
+                // Also configure for HTTP if the server supports it
+                const httpKey = `http.http://${serverHost}/.proxy`;
+                yield git.config(httpKey, proxyUrl);
+                core.notice(`✅ Configured HTTP proxy: ${httpKey} = ${urlHelper.hideUrlCredentials(proxyUrl)}`);
+                // Configure proxy for submodules
+                yield git.config('http.proxy', proxyUrl);
+                core.notice(`✅ Configured global HTTP proxy: http.proxy = ${urlHelper.hideUrlCredentials(proxyUrl)}`);
             }
-            const serverUrl = settings.githubServerUrl || 'https://github.com';
-            const serverHost = new URL(serverUrl).hostname;
-            // Configure HTTP proxy for the specific GitHub server
-            const httpProxyKey = `http.https://${serverHost}/.proxy`;
-            yield git.config(httpProxyKey, proxyUrl);
-            core.notice(`✅ Configured HTTPS proxy: ${httpProxyKey} = ${proxyUrl}`);
-            // Also configure for HTTP if the server supports it
-            const httpKey = `http.http://${serverHost}/.proxy`;
-            yield git.config(httpKey, proxyUrl);
-            core.notice(`✅ Configured HTTP proxy: ${httpKey} = ${proxyUrl}`);
-            // Configure proxy for submodules
-            yield git.config('http.proxy', proxyUrl);
-            core.notice(`✅ Configured global HTTP proxy: http.proxy = ${proxyUrl}`);
             // Set proxy timeout and other related settings
             yield git.config('http.lowSpeedLimit', '1000');
             yield git.config('http.lowSpeedTime', '300');
@@ -2594,6 +2646,7 @@ exports.getServerApiUrl = getServerApiUrl;
 exports.isGhes = isGhes;
 exports.getProxyUrl = getProxyUrl;
 exports.validateProxyUrl = validateProxyUrl;
+exports.hideUrlCredentials = hideUrlCredentials;
 exports.testProxyConnection = testProxyConnection;
 const assert = __importStar(__nccwpck_require__(9491));
 const core = __importStar(__nccwpck_require__(2186));
@@ -2614,20 +2667,54 @@ function getFetchUrl(settings) {
     }
     // Build HTTPS URL
     const originUrl = `${serviceUrl.origin}/${encodedOwner}/${encodedName}`;
-    // Apply proxy if configured
-    if (settings.githubProxyUrl && settings.githubProxyUrl.trim()) {
+    // 检查是否有代理URL和代理URL中是否包含认证信息
+    const hasProxyUrl = settings.githubProxyUrl && settings.githubProxyUrl.trim();
+    let hasProxyAuth = false;
+    if (hasProxyUrl) {
+        try {
+            const proxyUrlObj = new url_1.URL(settings.githubProxyUrl.trim());
+            hasProxyAuth = !!(proxyUrlObj.username && proxyUrlObj.password);
+        }
+        catch (error) {
+            // 如果解析失败，认为没有认证信息
+            hasProxyAuth = false;
+        }
+    }
+    // 根据四种情况决定最终URL
+    if (hasProxyUrl && hasProxyAuth) {
+        // 情况4: 有代理URL + 代理URL中有认证 -> https://username:password@proxy.com/https://github.com/org/repo
+        const finalUrl = getProxyUrlWithEmbeddedAuth(originUrl, settings.githubProxyUrl);
+        core.notice('🔄 APPLYING PROXY URL WITH EMBEDDED AUTHENTICATION');
+        core.notice(`📦 Repository: ${settings.repositoryOwner}/${settings.repositoryName}`);
+        core.notice(`🔗 Original URL: ${originUrl}`);
+        core.notice(`🌐 Proxy prefix: ${hideUrlCredentials(settings.githubProxyUrl)}`);
+        core.notice(`🎯 Final URL: ${hideUrlCredentials(finalUrl)}`);
+        return finalUrl;
+    }
+    else if (hasProxyUrl && !hasProxyAuth) {
+        // 情况1: 有代理URL + 代理URL中无认证 -> https://proxy.com/https://github.com/org/repo
         const proxyUrl = getProxyUrl(originUrl, settings.githubProxyUrl);
-        // Enhanced logging for proxy configuration
-        core.notice('🔄 APPLYING PROXY URL TRANSFORMATION');
+        core.notice('🔄 APPLYING PROXY URL (NO EMBEDDED AUTH)');
         core.notice(`📦 Repository: ${settings.repositoryOwner}/${settings.repositoryName}`);
         core.notice(`🔗 Original URL: ${originUrl}`);
         core.notice(`🌐 Proxy prefix: ${settings.githubProxyUrl}`);
-        core.notice(`🎯 Final proxy URL: ${proxyUrl}`);
-        core.notice(`✨ Transformation: ${originUrl !== proxyUrl ? 'APPLIED' : 'NO CHANGE'}`);
+        core.notice(`🎯 Final URL: ${proxyUrl}`);
         return proxyUrl;
     }
-    core.notice(`📡 Using DIRECT connection: ${originUrl}`);
-    return originUrl;
+    else if (!hasProxyUrl && settings.authToken && settings.authToken.trim()) {
+        // 情况2: 无代理URL + 有settings认证 -> https://token:x-oauth-basic@github.com/org/repo
+        const authUrl = addAuthToUrl(originUrl, settings.authToken);
+        core.notice('🔐 APPLYING DIRECT AUTHENTICATION (SETTINGS TOKEN)');
+        core.notice(`📦 Repository: ${settings.repositoryOwner}/${settings.repositoryName}`);
+        core.notice(`🔗 Original URL: ${originUrl}`);
+        core.notice(`🎯 Final URL: ${hideUrlCredentials(authUrl)}`);
+        return authUrl;
+    }
+    else {
+        // 情况3: 无代理URL + 无认证 -> https://github.com/org/repo
+        core.notice(`📡 Using DIRECT connection (no proxy, no auth): ${originUrl}`);
+        return originUrl;
+    }
 }
 function getServerUrl(url) {
     let resolvedUrl = process.env['GITHUB_SERVER_URL'] || 'https://github.com';
@@ -2676,32 +2763,12 @@ function hasContent(text, whitespaceMode) {
     return refinedText.length > 0;
 }
 function getProxyUrl(originalUrl, proxyPrefix) {
-    if (!proxyPrefix || !proxyPrefix.trim()) {
-        return originalUrl;
-    }
     const cleanPrefix = proxyPrefix.trim().replace(/\/$/, '');
     try {
-        // 验证代理前缀是否为有效URL
-        new url_1.URL(cleanPrefix);
-        // 处理不同的代理模式
-        if (cleanPrefix.includes('github.com') || cleanPrefix.includes('ghproxy')) {
-            // GitHub镜像代理模式: https://ghproxy.com/https://github.com/...
-            return `${cleanPrefix}/${originalUrl}`;
-        }
-        else if (cleanPrefix.includes('fastgit') || cleanPrefix.includes('gitclone')) {
-            // FastGit类型代理: 替换域名
-            const originalUrlObj = new url_1.URL(originalUrl);
-            const proxyUrlObj = new url_1.URL(cleanPrefix);
-            originalUrlObj.hostname = proxyUrlObj.hostname;
-            if (proxyUrlObj.port) {
-                originalUrlObj.port = proxyUrlObj.port;
-            }
-            return originalUrlObj.toString();
-        }
-        else {
-            // 通用代理模式: 直接拼接
-            return `${cleanPrefix}/${originalUrl}`;
-        }
+        // 简单的代理前缀模式: https://proxy.com/https://github.com/org/repo
+        const proxyUrl = `${cleanPrefix}/${originalUrl}`;
+        core.debug(`🔧 Proxy prefix mode: ${proxyUrl}`);
+        return proxyUrl;
     }
     catch (error) {
         core.warning(`Invalid proxy URL format: ${cleanPrefix}, using original URL`);
@@ -2720,6 +2787,43 @@ function validateProxyUrl(proxyUrl) {
         return false;
     }
 }
+/**
+ * 安全地隐藏URL中的认证信息用于日志输出
+ */
+function hideUrlCredentials(url) {
+    return url.replace(/:([^:@]+)@/, ':***@');
+}
+/**
+ * 将认证信息添加到URL中
+ */
+function addAuthToUrl(url, authToken) {
+    try {
+        const urlObj = new url_1.URL(url);
+        urlObj.username = authToken;
+        urlObj.password = 'x-oauth-basic';
+        return urlObj.toString();
+    }
+    catch (error) {
+        core.warning(`Failed to add auth to URL: ${url}`);
+        return url;
+    }
+}
+/**
+ * 获取带嵌入认证的代理URL (认证信息已经在代理URL中)
+ */
+function getProxyUrlWithEmbeddedAuth(originalUrl, proxyUrl) {
+    try {
+        const cleanProxy = proxyUrl.trim().replace(/\/$/, '');
+        // 直接使用包含认证信息的代理URL
+        const finalUrl = `${cleanProxy}/${originalUrl}`;
+        core.debug(`🔧 Using embedded auth proxy: ${hideUrlCredentials(finalUrl)}`);
+        return finalUrl;
+    }
+    catch (error) {
+        core.warning(`Failed to create proxy URL with embedded auth: ${proxyUrl}`);
+        return `${proxyUrl.replace(/\/$/, '')}/${originalUrl}`;
+    }
+}
 function testProxyConnection(proxyUrl_1) {
     return __awaiter(this, arguments, void 0, function* (proxyUrl, targetUrl = 'https://github.com', timeoutMs = 10000) {
         if (!validateProxyUrl(proxyUrl)) {
@@ -2728,7 +2832,9 @@ function testProxyConnection(proxyUrl_1) {
         const startTime = Date.now();
         try {
             const testUrl = getProxyUrl(targetUrl, proxyUrl);
-            core.debug(`Testing proxy connection to: ${testUrl}`);
+            // 隐藏认证信息用于日志输出
+            const safeTestUrl = hideUrlCredentials(testUrl);
+            core.debug(`Testing proxy connection to: ${safeTestUrl}`);
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
             const response = yield (0, node_fetch_1.default)(testUrl, {
