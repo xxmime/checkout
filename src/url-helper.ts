@@ -57,6 +57,12 @@ export function isGhes(url?: string): boolean {
   return !isGitHubHost && !isGitHubEnterpriseCloudHost && !isLocalHost
 }
 
+/**
+ * 验证代理URL格式
+ * @param proxyUrl 代理URL字符串
+ * @returns 验证后的URL对象或null
+ */
+
 function pruneSuffix(text: string, suffix: string) {
   if (hasContent(suffix, WhitespaceMode.Preserve) && text?.endsWith(suffix)) {
     return text.substring(0, text.length - suffix.length)

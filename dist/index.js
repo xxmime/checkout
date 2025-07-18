@@ -185,6 +185,7 @@ class GitAuthHelper {
             // Configure new values
             yield this.configureSsh();
             yield this.configureToken();
+            yield this.configureProxy();
         });
     }
     configureTempGlobalConfig() {
@@ -240,6 +241,8 @@ class GitAuthHelper {
                         yield this.git.config(this.insteadOfKey, insteadOfValue, true, true);
                     }
                 }
+                // Configure proxy settings
+                yield this.configureProxy(true);
             }
             catch (err) {
                 // Unset in case somehow written to the real global config
@@ -283,6 +286,7 @@ class GitAuthHelper {
         return __awaiter(this, void 0, void 0, function* () {
             yield this.removeSsh();
             yield this.removeToken();
+            yield this.removeProxy();
         });
     }
     removeGlobalConfig() {
@@ -428,6 +432,61 @@ class GitAuthHelper {
             yield this.git.submoduleForeach(
             // wrap the pipeline in quotes to make sure it's handled properly by submoduleForeach, rather than just the first part of the pipeline
             `sh -c "git config --local --name-only --get-regexp '${pattern}' && git config --local --unset-all '${configKey}' || :"`, true);
+        });
+    }
+    configureProxy(globalConfig) {
+        return __awaiter(this, void 0, void 0, function* () {
+            // 检查是否有代理URL配置
+            if (!this.settings.githubProxyUrl) {
+                core.debug('No proxy URL configured, skipping proxy configuration');
+                return;
+            }
+            try {
+                // 验证代理URL格式
+                const proxyUrl = new URL(this.settings.githubProxyUrl);
+                core.info(`Configuring Git proxy: ${proxyUrl.origin}`);
+                // 配置HTTP代理
+                yield this.git.config('http.proxy', proxyUrl.origin, globalConfig);
+                core.debug(`Configured http.proxy: ${proxyUrl.origin}`);
+                // 配置HTTPS代理
+                yield this.git.config('https.proxy', proxyUrl.origin, globalConfig);
+                core.debug(`Configured https.proxy: ${proxyUrl.origin}`);
+                // 如果代理需要认证，配置认证信息
+                if (proxyUrl.username || proxyUrl.password) {
+                    const authString = `${proxyUrl.username || ''}:${proxyUrl.password || ''}`;
+                    const encodedAuth = Buffer.from(authString, 'utf8').toString('base64');
+                    // 配置代理认证
+                    yield this.git.config('http.proxyAuth', encodedAuth, globalConfig);
+                    core.debug('Configured proxy authentication');
+                }
+                // 配置代理绕过规则（可选）
+                const noProxy = process.env['no_proxy'] || process.env['NO_PROXY'];
+                if (noProxy) {
+                    yield this.git.config('http.noProxy', noProxy, globalConfig);
+                    core.debug(`Configured no_proxy: ${noProxy}`);
+                }
+            }
+            catch (error) {
+                core.warning(`Failed to configure proxy: ${error}`);
+                // 清理已配置的代理设置
+                yield this.removeProxy(globalConfig);
+                throw error;
+            }
+        });
+    }
+    removeProxy(globalConfig) {
+        return __awaiter(this, void 0, void 0, function* () {
+            try {
+                // 移除HTTP代理配置
+                yield this.git.tryConfigUnset('http.proxy', globalConfig);
+                yield this.git.tryConfigUnset('https.proxy', globalConfig);
+                yield this.git.tryConfigUnset('http.proxyAuth', globalConfig);
+                yield this.git.tryConfigUnset('http.noProxy', globalConfig);
+                core.debug('Removed proxy configurations');
+            }
+            catch (error) {
+                core.debug(`Error removing proxy config: ${error}`);
+            }
         });
     }
 }
@@ -1543,9 +1602,6 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.downloadRepository = downloadRepository;
 exports.getDefaultBranch = getDefaultBranch;
@@ -1557,16 +1613,16 @@ const io = __importStar(__nccwpck_require__(7436));
 const path = __importStar(__nccwpck_require__(1017));
 const retryHelper = __importStar(__nccwpck_require__(2155));
 const toolCache = __importStar(__nccwpck_require__(7784));
-const node_fetch_1 = __importDefault(__nccwpck_require__(467));
 const uuid_1 = __nccwpck_require__(5840);
 const url_helper_1 = __nccwpck_require__(9437);
+const github_mirror_proxy_1 = __nccwpck_require__(4523);
 const IS_WINDOWS = process.platform === 'win32';
 function downloadRepository(authToken, owner, repo, ref, commit, repositoryPath, baseUrl, proxyUrl) {
     return __awaiter(this, void 0, void 0, function* () {
         // Determine the default branch
         if (!ref && !commit) {
             core.info('Determining the default branch');
-            ref = yield getDefaultBranch(authToken, owner, repo, baseUrl);
+            ref = yield getDefaultBranch(authToken, owner, repo, baseUrl, proxyUrl);
         }
         // Download the archive
         let archiveData = yield retryHelper.execute(() => __awaiter(this, void 0, void 0, function* () {
@@ -1616,10 +1672,15 @@ function downloadRepository(authToken, owner, repo, ref, commit, repositoryPath,
 /**
  * Looks up the default branch name
  */
-function getDefaultBranch(authToken, owner, repo, baseUrl) {
+function getDefaultBranch(authToken, owner, repo, baseUrl, proxyUrl) {
     return __awaiter(this, void 0, void 0, function* () {
         return yield retryHelper.execute(() => __awaiter(this, void 0, void 0, function* () {
             core.info('Retrieving the default branch name');
+            // 如果有镜像代理配置，暂不支持API调用的镜像代理
+            if (proxyUrl) {
+                core.warning('Proxy configuration ignored for API calls. Only archive downloads support mirror proxy.');
+            }
+            // 原有的octokit逻辑（无代理时使用）
             const octokit = github.getOctokit(authToken, {
                 baseUrl: (0, url_helper_1.getServerApiUrl)(baseUrl)
             });
@@ -1655,22 +1716,502 @@ function downloadArchive(authToken, owner, repo, ref, commit, baseUrl, proxyUrl)
     return __awaiter(this, void 0, void 0, function* () {
         const serverUrl = (0, url_helper_1.getServerApiUrl)(baseUrl) || 'https://api.github.com';
         const archiveFormat = IS_WINDOWS ? 'zipball' : 'tarball';
-        let url = `${proxyUrl}/${serverUrl}/repos/${owner}/${repo}/${archiveFormat}/${commit || ref}`;
-        if (proxyUrl === undefined) {
-            url = `${proxyUrl}/${url}`;
+        const originalUrl = `${serverUrl}/repos/${owner}/${repo}/${archiveFormat}/${commit || ref}`;
+        // 检查是否使用GitHub镜像代理模式
+        if (proxyUrl && isGitHubMirrorProxy(proxyUrl)) {
+            return yield downloadWithMirrorProxy(originalUrl, authToken, proxyUrl);
         }
-        const response = yield (0, node_fetch_1.default)(url, {
-            headers: {
-                'Authorization': `token ${authToken}`,
-                'Accept': 'application/vnd.github.v3+json'
+        // 如果没有代理但启用了自动镜像检测
+        if (!proxyUrl && process.env['GITHUB_AUTO_MIRROR'] === 'true') {
+            return yield downloadWithAutoMirror(originalUrl, authToken);
+        }
+        // 如果指定了非镜像代理URL，给出警告并使用直接下载
+        if (proxyUrl) {
+            core.warning(`Traditional proxy not supported. Use GitHub mirror proxy instead: ${proxyUrl}`);
+        }
+        // 使用直接下载
+        return yield downloadDirectly(originalUrl, authToken);
+    });
+}
+/**
+ * 检查是否为GitHub镜像代理URL
+ */
+function isGitHubMirrorProxy(proxyUrl) {
+    try {
+        const url = new URL(proxyUrl);
+        // 检查是否为已知的镜像代理服务
+        const knownMirrors = Object.values(github_mirror_proxy_1.POPULAR_GITHUB_MIRRORS);
+        return knownMirrors.some(mirror => {
+            try {
+                const mirrorUrl = new URL(mirror);
+                return url.hostname === mirrorUrl.hostname;
+            }
+            catch (_a) {
+                return false;
             }
         });
+    }
+    catch (_a) {
+        return false;
+    }
+}
+/**
+ * 使用GitHub镜像代理下载
+ */
+function downloadWithMirrorProxy(originalUrl, authToken, proxyUrl) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const mirrorProxy = (0, github_mirror_proxy_1.createGitHubMirrorProxy)(proxyUrl);
+        const proxyInfo = mirrorProxy.convertToProxyUrl(originalUrl);
+        if (!proxyInfo.isSupported) {
+            core.warning(`URL not supported by mirror proxy: ${originalUrl}`);
+            throw new Error('URL not supported by GitHub mirror proxy');
+        }
+        const authInfo = proxyInfo.hasAuth ? ' (with embedded auth)' : '';
+        core.info(`Using GitHub mirror proxy: ${proxyInfo.mirrorDomain}${authInfo}`);
+        // 安全地记录代理URL（隐藏认证信息）
+        const safeProxyUrl = sanitizeProxyUrl(proxyInfo.proxyUrl);
+        core.debug(`Mirror proxy URL: ${safeProxyUrl}`);
+        const fetch = __nccwpck_require__(467);
+        try {
+            const headers = {
+                'Accept': 'application/vnd.github.v3+json',
+                'User-Agent': 'actions/checkout'
+            };
+            // 如果镜像代理没有内嵌认证信息，则添加Authorization头
+            if (!proxyInfo.hasAuth && authToken) {
+                headers['Authorization'] = `token ${authToken}`;
+            }
+            const response = yield fetch(proxyInfo.proxyUrl, {
+                method: 'GET',
+                headers,
+                timeout: 60000 // 镜像代理可能需要更长时间
+            });
+            if (!response.ok) {
+                throw new Error(`Mirror proxy failed: ${response.status} ${response.statusText}`);
+            }
+            core.info('Successfully downloaded via GitHub mirror proxy');
+            return Buffer.from(yield response.arrayBuffer());
+        }
+        catch (error) {
+            core.warning(`Mirror proxy download failed: ${error}`);
+            // 回退到原始URL
+            core.info('Falling back to direct download');
+            return yield downloadDirectly(originalUrl, authToken);
+        }
+    });
+}
+/**
+ * 安全地隐藏URL中的敏感信息
+ */
+function sanitizeProxyUrl(url) {
+    try {
+        const urlObj = new URL(url);
+        if (urlObj.username || urlObj.password) {
+            return `${urlObj.protocol}//*****:*****@${urlObj.host}${urlObj.pathname}`;
+        }
+        return url;
+    }
+    catch (_a) {
+        return '[INVALID URL]';
+    }
+}
+/**
+ * 自动检测并使用最佳镜像代理下载
+ */
+function downloadWithAutoMirror(originalUrl, authToken) {
+    return __awaiter(this, void 0, void 0, function* () {
+        core.info('Auto-detecting best GitHub mirror proxy...');
+        try {
+            const detection = yield (0, github_mirror_proxy_1.detectBestMirror)(undefined, 3000); // 3秒超时
+            if (detection.bestMirror) {
+                core.info(`Auto-selected mirror: ${detection.bestMirror}`);
+                return yield downloadWithMirrorProxy(originalUrl, authToken, detection.bestMirror);
+            }
+            else {
+                core.info('No available mirrors found, using direct download');
+                return yield downloadDirectly(originalUrl, authToken);
+            }
+        }
+        catch (error) {
+            core.warning(`Mirror auto-detection failed: ${error}`);
+            return yield downloadDirectly(originalUrl, authToken);
+        }
+    });
+}
+/**
+ * 直接下载（无代理）
+ */
+function downloadDirectly(originalUrl, authToken) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const fetch = __nccwpck_require__(467);
+        const response = yield fetch(originalUrl, {
+            method: 'GET',
+            headers: {
+                'Authorization': `token ${authToken}`,
+                'Accept': 'application/vnd.github.v3+json',
+                'User-Agent': 'actions/checkout'
+            },
+            timeout: 30000
+        });
         if (!response.ok) {
-            throw new Error(`Failed to download archive: ${response.statusText}`);
+            throw new Error(`Direct download failed: ${response.status} ${response.statusText}`);
         }
         return Buffer.from(yield response.arrayBuffer());
     });
 }
+
+
+/***/ }),
+
+/***/ 4523:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
+var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
+    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+    return new (P || (P = Promise))(function (resolve, reject) {
+        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+        step((generator = generator.apply(thisArg, _arguments || [])).next());
+    });
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.SmartMirrorSelector = exports.POPULAR_GITHUB_MIRRORS = exports.GitHubMirrorProxy = void 0;
+exports.createGitHubMirrorProxy = createGitHubMirrorProxy;
+exports.detectBestMirror = detectBestMirror;
+const core = __importStar(__nccwpck_require__(2186));
+const url_1 = __nccwpck_require__(7310);
+/**
+ * GitHub镜像代理服务支持
+ * 支持类似 gh-proxy.com 的镜像加速服务
+ */
+class GitHubMirrorProxy {
+    constructor(baseUrl, config) {
+        // 解析baseUrl中的认证信息
+        const { cleanUrl, username, token } = this.parseAuthFromUrl(baseUrl);
+        this.config = Object.assign({ baseUrl: this.normalizeBaseUrl(cleanUrl), timeout: 30000, retries: 3, enableFallback: true, supportedDomains: [
+                'github.com',
+                'api.github.com',
+                'raw.githubusercontent.com',
+                'codeload.github.com',
+                'objects.githubusercontent.com'
+            ], authUsername: username, authToken: token }, config);
+        const authInfo = this.config.authUsername ? ' (with auth)' : '';
+        core.debug(`GitHub mirror proxy initialized: ${this.config.baseUrl}${authInfo}`);
+    }
+    /**
+     * 将GitHub URL转换为镜像代理URL
+     */
+    convertToProxyUrl(originalUrl) {
+        try {
+            const url = new url_1.URL(originalUrl);
+            const isSupported = this.isSupportedDomain(url.hostname);
+            if (!isSupported) {
+                return {
+                    originalUrl,
+                    proxyUrl: originalUrl,
+                    mirrorDomain: url.hostname,
+                    isSupported: false,
+                    hasAuth: false
+                };
+            }
+            // 构建镜像代理URL
+            // 格式: https://username:token@mirror-proxy.com/https://github.com/...
+            let proxyUrl = `${this.config.baseUrl}/${originalUrl}`;
+            // 如果有认证信息，添加到URL中
+            if (this.config.authUsername && this.config.authToken) {
+                const baseUrlObj = new url_1.URL(this.config.baseUrl);
+                baseUrlObj.username = this.config.authUsername;
+                baseUrlObj.password = this.config.authToken;
+                proxyUrl = `${baseUrlObj.toString().replace(/\/$/, '')}/${originalUrl}`;
+            }
+            return {
+                originalUrl,
+                proxyUrl,
+                mirrorDomain: url.hostname,
+                isSupported: true,
+                hasAuth: !!(this.config.authUsername && this.config.authToken)
+            };
+        }
+        catch (error) {
+            core.debug(`Failed to parse URL: ${originalUrl} - ${error}`);
+            return {
+                originalUrl,
+                proxyUrl: originalUrl,
+                mirrorDomain: 'unknown',
+                isSupported: false,
+                hasAuth: false
+            };
+        }
+    }
+    /**
+     * 检查域名是否支持镜像代理
+     */
+    isSupportedDomain(hostname) {
+        return this.config.supportedDomains.some(domain => hostname === domain || hostname.endsWith(`.${domain}`));
+    }
+    /**
+     * 从URL中解析认证信息
+     */
+    parseAuthFromUrl(baseUrl) {
+        try {
+            const url = new url_1.URL(baseUrl);
+            const username = url.username || undefined;
+            const token = url.password || undefined;
+            // 创建不包含认证信息的干净URL
+            url.username = '';
+            url.password = '';
+            const cleanUrl = url.toString();
+            return { cleanUrl, username, token };
+        }
+        catch (error) {
+            throw new Error(`Invalid mirror proxy base URL: ${baseUrl}`);
+        }
+    }
+    /**
+     * 规范化基础URL
+     */
+    normalizeBaseUrl(baseUrl) {
+        try {
+            const url = new url_1.URL(baseUrl);
+            // 移除末尾的斜杠和认证信息
+            url.username = '';
+            url.password = '';
+            return url.toString().replace(/\/$/, '');
+        }
+        catch (error) {
+            throw new Error(`Invalid mirror proxy base URL: ${baseUrl}`);
+        }
+    }
+    /**
+     * 批量转换URL列表
+     */
+    convertUrlList(urls) {
+        return urls.map(url => this.convertToProxyUrl(url));
+    }
+    /**
+     * 检查镜像代理是否可用
+     */
+    checkAvailability() {
+        return __awaiter(this, void 0, void 0, function* () {
+            const startTime = Date.now();
+            try {
+                const fetch = __nccwpck_require__(467);
+                // 构建测试URL，包含认证信息（如果有）
+                let testUrl = `${this.config.baseUrl}/https://api.github.com/zen`;
+                if (this.config.authUsername && this.config.authToken) {
+                    const baseUrlObj = new url_1.URL(this.config.baseUrl);
+                    baseUrlObj.username = this.config.authUsername;
+                    baseUrlObj.password = this.config.authToken;
+                    testUrl = `${baseUrlObj.toString()}/https://api.github.com/zen`;
+                }
+                const response = yield fetch(testUrl, {
+                    method: 'GET',
+                    timeout: this.config.timeout,
+                    headers: {
+                        'User-Agent': 'actions/checkout-mirror-test'
+                    }
+                });
+                const responseTime = Date.now() - startTime;
+                if (response.ok) {
+                    return {
+                        available: true,
+                        responseTime
+                    };
+                }
+                else {
+                    return {
+                        available: false,
+                        responseTime,
+                        error: `HTTP ${response.status}: ${response.statusText}`
+                    };
+                }
+            }
+            catch (error) {
+                return {
+                    available: false,
+                    responseTime: Date.now() - startTime,
+                    error: error.message
+                };
+            }
+        });
+    }
+    /**
+     * 获取配置信息
+     */
+    getConfig() {
+        return Object.freeze(Object.assign({}, this.config));
+    }
+    /**
+     * 生成镜像代理报告
+     */
+    generateReport() {
+        return `GitHub Mirror Proxy Report:
+=============================
+
+Configuration:
+- Base URL: ${this.config.baseUrl}
+- Timeout: ${this.config.timeout}ms
+- Retries: ${this.config.retries}
+- Fallback Enabled: ${this.config.enableFallback}
+- Authentication: ${this.config.authUsername ? 'Enabled' : 'Disabled'}
+
+Supported Domains:
+${this.config.supportedDomains.map(domain => `- ${domain}`).join('\n')}
+
+Generated at: ${new Date().toISOString()}`;
+    }
+}
+exports.GitHubMirrorProxy = GitHubMirrorProxy;
+/**
+ * 常见的GitHub镜像代理服务
+ */
+exports.POPULAR_GITHUB_MIRRORS = {
+    'gh-proxy.com': 'https://gh-proxy.com',
+    'ghproxy.net': 'https://ghproxy.net',
+    'github.moeyy.xyz': 'https://github.moeyy.xyz',
+    'hub.fastgit.xyz': 'https://hub.fastgit.xyz',
+    'download.fastgit.org': 'https://download.fastgit.org'
+};
+/**
+ * 创建GitHub镜像代理实例
+ */
+function createGitHubMirrorProxy(baseUrl, config) {
+    return new GitHubMirrorProxy(baseUrl, config);
+}
+/**
+ * 自动检测最佳镜像代理
+ */
+function detectBestMirror() {
+    return __awaiter(this, arguments, void 0, function* (mirrors = Object.values(exports.POPULAR_GITHUB_MIRRORS), timeout = 5000) {
+        core.info('Detecting best GitHub mirror proxy...');
+        const results = yield Promise.allSettled(mirrors.map((mirror) => __awaiter(this, void 0, void 0, function* () {
+            const proxy = createGitHubMirrorProxy(mirror, { timeout });
+            const result = yield proxy.checkAvailability();
+            return {
+                mirror,
+                available: result.available,
+                responseTime: result.responseTime,
+                error: result.error
+            };
+        })));
+        const successfulResults = results
+            .filter((result) => result.status === 'fulfilled')
+            .map(result => result.value)
+            .filter(result => result.available)
+            .sort((a, b) => a.responseTime - b.responseTime);
+        const allResults = results.map(result => result.status === 'fulfilled' ? result.value : {
+            mirror: 'unknown',
+            available: false,
+            responseTime: timeout,
+            error: 'Promise rejected'
+        });
+        const bestMirror = successfulResults.length > 0 ? successfulResults[0].mirror : undefined;
+        if (bestMirror) {
+            core.info(`Best mirror detected: ${bestMirror} (${successfulResults[0].responseTime}ms)`);
+        }
+        else {
+            core.warning('No available GitHub mirror proxy found');
+        }
+        return {
+            bestMirror,
+            results: allResults
+        };
+    });
+}
+/**
+ * 智能镜像代理选择器
+ */
+class SmartMirrorSelector {
+    constructor(mirrors = Object.values(exports.POPULAR_GITHUB_MIRRORS), detectionInterval = 300000 // 5分钟
+    ) {
+        this.lastDetection = null;
+        this.cachedBestMirror = null;
+        this.mirrors = mirrors;
+        this.detectionInterval = detectionInterval;
+    }
+    /**
+     * 获取最佳镜像代理
+     */
+    getBestMirror() {
+        return __awaiter(this, arguments, void 0, function* (forceDetection = false) {
+            const now = new Date();
+            const needsDetection = forceDetection ||
+                !this.lastDetection ||
+                !this.cachedBestMirror ||
+                (now.getTime() - this.lastDetection.getTime()) > this.detectionInterval;
+            if (needsDetection) {
+                const detection = yield detectBestMirror(this.mirrors);
+                this.cachedBestMirror = detection.bestMirror || null;
+                this.lastDetection = now;
+            }
+            return this.cachedBestMirror;
+        });
+    }
+    /**
+     * 添加镜像代理
+     */
+    addMirror(mirror) {
+        if (!this.mirrors.includes(mirror)) {
+            this.mirrors.push(mirror);
+            core.debug(`Added mirror: ${mirror}`);
+        }
+    }
+    /**
+     * 移除镜像代理
+     */
+    removeMirror(mirror) {
+        const index = this.mirrors.indexOf(mirror);
+        if (index > -1) {
+            this.mirrors.splice(index, 1);
+            core.debug(`Removed mirror: ${mirror}`);
+            // 如果移除的是当前最佳镜像，清除缓存
+            if (this.cachedBestMirror === mirror) {
+                this.cachedBestMirror = null;
+                this.lastDetection = null;
+            }
+        }
+    }
+    /**
+     * 获取所有镜像列表
+     */
+    getMirrors() {
+        return [...this.mirrors];
+    }
+    /**
+     * 重置缓存
+     */
+    resetCache() {
+        this.cachedBestMirror = null;
+        this.lastDetection = null;
+    }
+}
+exports.SmartMirrorSelector = SmartMirrorSelector;
 
 
 /***/ }),
@@ -2491,6 +3032,11 @@ function isGhes(url) {
     const isLocalHost = hostname.endsWith('.LOCALHOST');
     return !isGitHubHost && !isGitHubEnterpriseCloudHost && !isLocalHost;
 }
+/**
+ * 验证代理URL格式
+ * @param proxyUrl 代理URL字符串
+ * @returns 验证后的URL对象或null
+ */
 function pruneSuffix(text, suffix) {
     if (hasContent(suffix, WhitespaceMode.Preserve) && (text === null || text === void 0 ? void 0 : text.endsWith(suffix))) {
         return text.substring(0, text.length - suffix.length);

@@ -79,6 +79,7 @@ class GitAuthHelper {
     // Configure new values
     await this.configureSsh()
     await this.configureToken()
+    await this.configureProxy()
   }
 
   async configureTempGlobalConfig(): Promise<string> {
@@ -138,6 +139,9 @@ class GitAuthHelper {
           await this.git.config(this.insteadOfKey, insteadOfValue, true, true)
         }
       }
+      
+      // Configure proxy settings
+      await this.configureProxy(true)
     } catch (err) {
       // Unset in case somehow written to the real global config
       core.info(
@@ -191,6 +195,7 @@ class GitAuthHelper {
   async removeAuth(): Promise<void> {
     await this.removeSsh()
     await this.removeToken()
+    await this.removeProxy()
   }
 
   async removeGlobalConfig(): Promise<void> {
@@ -370,5 +375,63 @@ class GitAuthHelper {
       `sh -c "git config --local --name-only --get-regexp '${pattern}' && git config --local --unset-all '${configKey}' || :"`,
       true
     )
+  }
+
+  private async configureProxy(globalConfig?: boolean): Promise<void> {
+    // 检查是否有代理URL配置
+    if (!this.settings.githubProxyUrl) {
+      core.debug('No proxy URL configured, skipping proxy configuration')
+      return
+    }
+
+    try {
+      // 验证代理URL格式
+      const proxyUrl = new URL(this.settings.githubProxyUrl)
+      core.info(`Configuring Git proxy: ${proxyUrl.origin}`)
+
+      // 配置HTTP代理
+      await this.git.config('http.proxy', proxyUrl.origin, globalConfig)
+      core.debug(`Configured http.proxy: ${proxyUrl.origin}`)
+
+      // 配置HTTPS代理
+      await this.git.config('https.proxy', proxyUrl.origin, globalConfig)
+      core.debug(`Configured https.proxy: ${proxyUrl.origin}`)
+
+      // 如果代理需要认证，配置认证信息
+      if (proxyUrl.username || proxyUrl.password) {
+        const authString = `${proxyUrl.username || ''}:${proxyUrl.password || ''}`
+        const encodedAuth = Buffer.from(authString, 'utf8').toString('base64')
+        
+        // 配置代理认证
+        await this.git.config('http.proxyAuth', encodedAuth, globalConfig)
+        core.debug('Configured proxy authentication')
+      }
+
+      // 配置代理绕过规则（可选）
+      const noProxy = process.env['no_proxy'] || process.env['NO_PROXY']
+      if (noProxy) {
+        await this.git.config('http.noProxy', noProxy, globalConfig)
+        core.debug(`Configured no_proxy: ${noProxy}`)
+      }
+
+    } catch (error) {
+      core.warning(`Failed to configure proxy: ${error}`)
+      // 清理已配置的代理设置
+      await this.removeProxy(globalConfig)
+      throw error
+    }
+  }
+
+  private async removeProxy(globalConfig?: boolean): Promise<void> {
+    try {
+      // 移除HTTP代理配置
+      await this.git.tryConfigUnset('http.proxy', globalConfig)
+      await this.git.tryConfigUnset('https.proxy', globalConfig)
+      await this.git.tryConfigUnset('http.proxyAuth', globalConfig)
+      await this.git.tryConfigUnset('http.noProxy', globalConfig)
+      core.debug('Removed proxy configurations')
+    } catch (error) {
+      core.debug(`Error removing proxy config: ${error}`)
+    }
   }
 }
